@@ -1,0 +1,47 @@
+"","accession","function.","group","mean_proportion"
+"1","PF00005.31","ABC transporter","Resistant",0.0121668698559517
+"2","PF00005.31","ABC transporter","Susceptible",0.00852523586938062
+"3","PF00205.26","Thiamine pyrophosphate enzyme, central domain","Resistant",0.000840700749730058
+"4","PF00205.26","Thiamine pyrophosphate enzyme, central domain","Susceptible",0.000393084633963583
+"5","PF00300.26","Histidine phosphatase superfamily (branch 1)","Resistant",0.000987052141217027
+"6","PF00300.26","Histidine phosphatase superfamily (branch 1)","Susceptible",0.000595475995352487
+"7","PF00330.24","Aconitase family (aconitate hydratase)","Resistant",0.000790199887610946
+"8","PF00330.24","Aconitase family (aconitate hydratase)","Susceptible",0.000436087636447875
+"9","PF00494.23","Squalene/phytoene synthase","Resistant",0.000601575201646574
+"10","PF00494.23","Squalene/phytoene synthase","Susceptible",0.00035385188478487
+"11","PF00528.26","Binding-protein-dependent transport system inner membrane component","Resistant",0.0054689339471013
+"12","PF00528.26","Binding-protein-dependent transport system inner membrane component","Susceptible",0.0025643470138576
+"13","PF01094.32","Receptor family ligand binding region","Resistant",0.000993454648173636
+"14","PF01094.32","Receptor family ligand binding region","Susceptible",0.00052968370617413
+"15","PF01257.23","Thioredoxin-like [2Fe-2S] ferredoxin","Resistant",0.000568654256409404
+"16","PF01257.23","Thioredoxin-like [2Fe-2S] ferredoxin","Susceptible",0.000317000552649376
+"17","PF01355.21","High potential iron-sulfur protein","Resistant",0.000406899386272518
+"18","PF01355.21","High potential iron-sulfur protein","Susceptible",0.000210325314885476
+"19","PF01546.32","Peptidase family M20/M25/M40","Resistant",0.00077397605344692
+"20","PF01546.32","Peptidase family M20/M25/M40","Susceptible",0.00164809080675723
+"21","PF01593.28","Flavin containing amine oxidoreductase","Resistant",0.00191131202587921
+"22","PF01593.28","Flavin containing amine oxidoreductase","Susceptible",0.00120036955076925
+"23","PF02776.22","Thiamine pyrophosphate enzyme, N-terminal TPP binding domain","Resistant",0.000868485900640291
+"24","PF02776.22","Thiamine pyrophosphate enzyme, N-terminal TPP binding domain","Susceptible",0.0004462296967679
+"25","PF03807.21","NADP oxidoreductase coenzyme F420-dependent","Resistant",0.00219274703616571
+"26","PF03807.21","NADP oxidoreductase coenzyme F420-dependent","Susceptible",0.00134968260185826
+"27","PF03972.18","MmgE/PrpD N-terminal domain","Resistant",0.000906303948890834
+"28","PF03972.18","MmgE/PrpD N-terminal domain","Susceptible",0.000336474388135555
+"29","PF07676.16","WD40-like Beta Propeller Repeat","Resistant",0.000702838392148676
+"30","PF07676.16","WD40-like Beta Propeller Repeat","Susceptible",0.00167892271279258
+"31","PF07992.18","Pyridine nucleotide-disulphide oxidoreductase","Resistant",0.00388024492564204
+"32","PF07992.18","Pyridine nucleotide-disulphide oxidoreductase","Susceptible",0.00275517451533742
+"33","PF12837.11","4Fe-4S binding domain","Resistant",0.00114540917846403
+"34","PF12837.11","4Fe-4S binding domain","Susceptible",0.000617855213652706
+"35","PF13304.10","AAA domain, putative AbiEii toxin, Type IV TA system","Resistant",0.00738805052730182
+"36","PF13304.10","AAA domain, putative AbiEii toxin, Type IV TA system","Susceptible",0.00532224093993742
+"37","PF13450.10","NAD(P)-binding Rossmann-like domain","Resistant",0.00407033099202039
+"38","PF13450.10","NAD(P)-binding Rossmann-like domain","Susceptible",0.00291800325650686
+"39","PF13478.10","XdhC Rossmann domain","Resistant",0.000450143748612507
+"40","PF13478.10","XdhC Rossmann domain","Susceptible",0.000246275757474445
+"41","PF13510.10","2Fe-2S iron-sulfur cluster binding domain","Resistant",0.00054938039943337
+"42","PF13510.10","2Fe-2S iron-sulfur cluster binding domain","Susceptible",0.000386396476084804
+"43","PF19305.3","MmgE/PrpD C-terminal domain","Resistant",0.000807969313242884
+"44","PF19305.3","MmgE/PrpD C-terminal domain","Susceptible",0.000329476375723675
+"45","PF20656.1","Malate synthase, N-terminal domain","Resistant",0.000427279680723503
+"46","PF20656.1","Malate synthase, N-terminal domain","Susceptible",0.000215623635962658

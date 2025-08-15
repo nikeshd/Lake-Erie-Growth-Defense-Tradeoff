@@ -1,0 +1,273 @@
+---
+title: "Mobilome"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(dplyr)
+library(vegan)
+library(ape)
+library(phytools)
+library(phylosignal)
+library(nlme)
+library(MASS)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+bins_extendedinfo <- read_csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/bins_extendedinfo.csv")
+allmags_cogs <- read_csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/cog_allmags.csv")
+sigmags_cogs <- read_csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/expanded_df_cog.csv")
+shared_cog_proportions <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/cog_proportions_shared.csv")
+#shared_pfam_proportions <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/filtered_proportions_for_tests.csv")
+#enriched_pfam <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/enriched_pfams.csv")
+enriched_KEGG <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/kegg_merged.csv")
+enriched_COG <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/final_results_cog.csv") 
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# resistance trait value (quagga_mean/control_mean)
+bins_extendedinfo <- bins_extendedinfo %>%
+  mutate(resistance_trait = quagga_mean / control_mean)
+
+# mean resistance trait across dates for each MAG
+resistance_mean <- bins_extendedinfo %>%
+  group_by(bin) %>%
+  summarise(mean_resistance = mean(resistance_trait, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# merge taxonomy
+mags_taxinfo <- bins_extendedinfo %>% 
+  dplyr::select(bin, t_phylum, t_class, t_order, t_family, t_genus, t_species) %>% 
+  rename(bin_name = bin)
+
+phyla_colors <- c(
+  Proteobacteria = "#E1A91F",
+  Bacteroidota = "#A6BF96",
+  Verrucomicrobiota = "#F4B5C8",
+  Planctomycetota = "#B39BC8",
+  Unknown = "#D3D3D3", 
+  Actinobacteriota = "#F4A259",
+  Cyanobacteria = "#78C2BE", 
+  Myxococcota = "#C7B198",
+  Gemmatimonadota = "#8D8DAA",
+  Chloroflexota = "#BCCF02"
+)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+mobilome_cogs <- sigmags_cogs %>% 
+  dplyr::filter(function. == "Mobilome: prophages, transposons")
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# Richness
+richness_df <- mobilome_cogs %>%
+  dplyr::group_by(bin_name) %>%
+  summarise(richness_mobilome = n_distinct(gene_callers_id)) %>%
+  left_join(mobilome_cogs %>% dplyr::select(bin_name, group) %>% distinct(), by = "bin_name")
+
+
+# Shannon Diversity
+shannon_df <- mobilome_cogs %>%
+  group_by(bin_name) %>%
+  summarise(shannon_mobilome = vegan::diversity(table(gene_callers_id))) %>% 
+  left_join(mobilome_cogs %>% dplyr::select(bin_name, group) %>% distinct(), by = "bin_name")
+
+# Richness Wilcoxon test 
+wilcox_richness <- wilcox.test(richness_mobilome ~ group, data = richness_df)
+
+# Shannon Diversity Wilcoxon test
+wilcox_shannon <- wilcox.test(shannon_mobilome ~ group, data = shannon_df)
+
+# results
+print("Richness Comparison:")
+print(wilcox_richness)
+
+print("Shannon Diversity Comparison:")
+print(wilcox_shannon)
+```
+Mobilome diversity is significantly different between resistant and susceptible populations:
+- Richness (p = 0.0074): Resistant and susceptible MAGs have significantly different numbers of unique mobilome-related genes. Higher richness in resistant MAGs suggests more diverse mobilome activity/function in resistant populations.
+- Shannon Diversity (p = 0.0080): Higher in resistant MAGs here indicates greater mobilome evenness, further supporting the idea that mobilome-associated genes are may play an adaptive role in conferring resistance to mussel predation.
+
+```{r, warning=FALSE, message=FALSE}
+# phylum_info
+mags_phy <- mags_taxinfo %>% 
+  filter(bin_name %in% richness_df$bin_name) %>% 
+  dplyr::select(bin_name, t_phylum) %>% 
+  distinct() %>% 
+    mutate(t_phylum = replace_na(t_phylum, "Unknown"))
+
+# merge taxonomy info
+richness_df <- left_join(richness_df, mags_phy, by = "bin_name")
+shannon_df <- left_join(shannon_df, mags_phy, by = "bin_name")
+
+# replace labels
+richness_df <- richness_df %>% dplyr::mutate(group = case_when(group == "resistant" ~ "Resistant", 
+                                         group == "susceptible" ~ "Susceptible"))
+shannon_df <- shannon_df %>% dplyr::mutate(group = case_when(group == "resistant" ~ "Resistant", 
+                                         group == "susceptible" ~ "Susceptible"))
+
+custom_colors <- c("Resistant" = "#B22222", "Susceptible" = "#808080")
+```
+
+Make plots comparing mobilome Richness and Shannon
+```{r, warning=FALSE, message=FALSE}
+Figure_3C_richness <- ggplot(richness_df, aes(x = group, y = richness_mobilome, fill = group)) +
+  #geom_violin(alpha = 0.3, width = 0.8, color = NA) +  
+  geom_boxplot(alpha = 0.9, width = 0.5, outlier.shape = NA) +  
+  #geom_jitter(aes(color = group), width = 0.1, alpha = 0.5, size = 3) +  
+  scale_y_log10() +  
+  scale_fill_manual(values = custom_colors, name = "Population category") +  
+  scale_color_manual(values = custom_colors, name = "Population category") +
+  labs(title = "Mobilome Richness", y = "Richness (log10)", x = "Population category") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 8, face = "bold", size = 22),
+    plot.margin = ggplot2::margin(50, 50, 10, 10),  
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14),  
+    axis.text.x = element_text(size = 14),  
+    axis.line = element_line(size = 0.8),
+    legend.position = "none",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 16, face = "bold"), 
+    panel.spacing = unit(1.5, "lines"),  
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.background = element_blank(),
+    panel.background = element_rect(fill = "white")
+  )
+
+Figure_3C_shannon <- ggplot(shannon_df, aes(x = group, y = shannon_mobilome, fill = group)) +
+  #geom_violin(alpha = 0.3, width = 0.8, color = NA) +  
+  geom_boxplot(alpha = 0.9, width = 0.5, outlier.shape = NA) +  
+  #geom_jitter(aes(color = group), width = 0.2, alpha = 0.8, size = 3.5) +  
+  scale_fill_manual(values = custom_colors, name = "Population category") +  
+  scale_color_manual(values = custom_colors, name = "Population category") +
+  labs(title = "Mobilome Shannon Diversity", y = "Shannon index", x = "Population category") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 8, face = "bold", size = 22),
+    plot.margin = ggplot2::margin(50, 50, 10, 10),  
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14),  
+    axis.text.x = element_text(size = 14),  
+    axis.line = element_line(size = 0.8),
+    legend.position = "none",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 16, face = "bold"), 
+    panel.spacing = unit(1.5, "lines"),  
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.background = element_blank(),
+    panel.background = element_rect(fill = "white")
+  )
+
+print(Figure_3C_shannon)
+print(Figure_3C_richness)
+
+ggsave(filename = "../R output/Figures/Figure_3C_richness.jpg", 
+       plot = Figure_3C_richness, 
+       width = 7, height = 7, dpi = 300, units = "in")
+ggsave(filename = "../R output/Figures/Figure_3C_shannon.jpg", 
+       plot = Figure_3C_shannon, 
+       width = 7, height = 7, dpi = 300, units = "in")
+```
+
+Correlation between KEGG and mobile diversity.
+```{r, warning=FALSE, message=FALSE}
+kegg_mobilome <- enriched_KEGG %>%
+  #dplyr::select(-group) %>% 
+  left_join(shannon_df, by = "bin_name") %>% 
+  dplyr::select(-group.y) %>% 
+  rename(group = "group.x")
+
+# filter modules with zero completeness
+kegg_filtered <- kegg_mobilome %>%
+  filter(stepwise_module_completeness > 0)
+
+# merge mobilome diversity and KEGG data
+kegg_summary_shannon <- kegg_filtered %>%
+  group_by(bin_name) %>%
+  dplyr::summarise(kegg_count = n_distinct(module),  # unique KEGG module count
+            mean_mobilome_shannon = mean(shannon_mobilome))  # mean Shannon diversity of mobilome
+
+# check correlation
+cor_test_shannon <- cor.test(kegg_summary_shannon$kegg_count, kegg_summary_shannon$mean_mobilome_shannon, method = "spearman")
+print(cor_test_shannon)
+```
+This indicates that populations with higher mobilome Shannon diversity index tend to have a greater number of unique KEGG modules (Spearman's ρ = 0.36, p < 0.001).
+
+
+```{r, warning=FALSE, message=FALSE}
+groupinfo <- shannon_df %>% 
+  dplyr::select(bin_name, group)
+kegg_summary_shannon <- left_join(kegg_summary_shannon, groupinfo, by = "bin_name")
+
+# Define custom legends
+custom_colors <- c("Resistant" = "#B22222", "Susceptible" = "#808080")
+custom_shapes <- c("Resistant" = 17, "Susceptible" = 16)
+
+# Scatter plot of KEGG enrichment vs. Shannon diversity
+Figure_S3 <- ggplot(kegg_summary_shannon %>% drop_na(mean_mobilome_shannon, kegg_count, group), 
+                               aes(x = mean_mobilome_shannon, y = kegg_count)) +
+  geom_point(aes(color = group), alpha = 0.7, size = 5) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "gray70", linewidth = 1) +
+  scale_color_manual(values = custom_colors) +  # Colors (no legend)
+  scale_shape_manual(values = custom_shapes, name = "Population Category") +
+  labs(title = "KEGG Module Count vs. Mobile Elements Diversity (Shannon)",
+       x = "Shannon Diversity of Mobile Elements", y = "Number of Enriched KEGG Modules") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 10),  
+    axis.text.x = element_text(size = 14),
+    axis.line = element_line(size = 0.8),
+    legend.position = "right",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_blank(),
+    panel.spacing = unit(3, "lines"),  
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  # Remove color legend and keep shape legend
+  guides(color = "none")
+
+print(Figure_S3)
+ggsave(filename = "../R output/Figures/Figure_S3.jpg", 
+       plot = Figure_S3, 
+       width = 15, height = 10, dpi = 300, units = "in")
+```
+
+
+Run GLM
+```{r, warning=FALSE, message=FALSE}
+glm_kegg_shannon <- glm(kegg_count ~ mean_mobilome_shannon, 
+                         family = poisson(link = "log"), 
+                         data = kegg_summary_shannon)
+summary(glm_kegg_shannon)
+```
+
+
+

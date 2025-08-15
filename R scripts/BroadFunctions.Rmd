@@ -1,0 +1,531 @@
+---
+title: "Broad Functions"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(reshape2)
+library(ggforce)
+library(vegan)
+```
+
+Load bin info 
+```{r, warning=FALSE, message=FALSE}
+bins_extendedinfo <- read_csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/bins_extendedinfo.csv")
+```
+
+Load metabolic enrichment results
+```{r, warning=FALSE, message=FALSE}
+sigbins_enrichment <- read_delim("~/Documents/UMich/papers/GrowthDefenseTradeOff/anvio files//anvi_metabolism_output/metabolic_enrichment_output/sigbins_functional-enrichment-txt", 
+    delim = "\t", escape_double = FALSE, 
+    trim_ws = TRUE)
+```
+
+Load the module paths, hits, steps, and function info
+```{r, warning=FALSE, message=FALSE}
+metab_modules <- read.table("~/Documents/UMich/papers/GrowthDefenseTradeOff/anvio files//anvi_metabolism_output/kegg-metabolism_modules.txt",sep="\t",header=T)
+metab_modulesteps <- read.table("~/Documents/UMich/papers/GrowthDefenseTradeOff/anvio files//anvi_metabolism_output/kegg-metabolism_module_steps.txt",sep="\t",header=T)
+metab_modulepaths <- read.table("~/Documents/UMich/papers/GrowthDefenseTradeOff/anvio files//anvi_metabolism_output/kegg-metabolism_module_paths.txt",sep="\t",header=T)
+metab_hits <- read.table("~/Documents/UMich/papers/GrowthDefenseTradeOff/anvio files//anvi_metabolism_output/kegg-metabolism_hits.txt",sep="\t",header=T)
+```
+
+Combine dfs
+```{r, warning=FALSE, message=FALSE}
+metab_modules_unique <- metab_modules %>% 
+  distinct(module, .keep_all = TRUE) %>% 
+  dplyr::rename(accession = module)
+
+sigbins_combined <- merge(sigbins_enrichment, metab_modules_unique[c('accession', 'module_category', 'module_subcategory')], by = "accession", all.x = TRUE)
+```
+
+
+Rename the increase and decrease categories into resistant and susceptible categories.
+```{r, warning=FALSE, message=FALSE}
+sigbins_combined <- sigbins_combined %>% 
+  mutate(associated_groups = ifelse(associated_groups == "increase", "resistant", 
+                                    ifelse(associated_groups == "decrease", "susceptible", associated_groups)))
+```
+
+Filter out modules that were enrichred significantly from the sigbins_combined 
+```{r, warning=FALSE, message=FALSE}
+sigmodules_sigmags <- sigbins_combined %>% 
+  filter(adjusted_q_value < 0.05)
+```
+This df contains the 35 modules (in total) that were significantly enriched (after multiple hypotheses correction) when metabolic enrichment analysis was performed between MAGs in the resistant and suceptible categories in anvio. Metabolic prediction was done based on the KEGG pathway annotations. ANVIO runs GLM for each function to see if it is significantly different between the provided categories. Here, we see that 26 out of 35 modules are enriched in the MAGs in the resistant category while 9 out of 35 MAGs are enriched in the susceptible category MAGs.
+
+```{r, warning=FALSE, message=FALSE}
+# filter kegg_metabolism_modules based on significant modules' IDs
+kegg_filtered <- metab_modules %>%
+  filter(module %in% sigmodules_sigmags$accession)
+```
+
+Load df containing list of MAGs that changed significantly
+```{r, warning=FALSE, message=FALSE}
+sig_bins <- read.delim("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/sig_bins.tsv")
+
+# merge MAG category info
+kegg_merged <- kegg_filtered %>%
+  left_join(sig_bins, by = "bin_name")
+
+# drop NA bins
+kegg_merged <- kegg_merged %>% 
+  filter(!is.na(group))
+
+# save df
+write.csv(kegg_merged, "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/kegg_merged.csv")
+```
+
+Compare mean pathwise module completness between the two MAG categories and plot
+```{r, warning=FALSE, message=FALSE}
+# Wilcoxon test
+overall_stepwise_meanresult <- wilcox.test(stepwise_module_completeness ~ group, data = kegg_merged)
+
+# print results
+print(overall_stepwise_meanresult)
+```
+There is a strong evidence to reject the null hypothesis in this case, indicating that the median pathwise completeness is different for MAGs in the resistant and susceptible categories for significantly enriched modules (N=35). More completeness of pathways indicates high metabolic independence conferred by biosynthetic capacity for various compounds.
+
+Plot the mean completion for the two MAG categories.
+```{r, warning=FALSE, message=FALSE}
+# calculate mean for bar plot
+overall_stepwise_df <- kegg_merged %>% 
+  dplyr::group_by(group) %>% 
+  summarise(mean_completeness = mean(stepwise_module_completeness, na.rm = TRUE))
+```
+
+Plot 3A
+```{r, warning=FALSE, message=FALSE}
+figure_3A <- ggplot(kegg_merged, aes(x = group, y = stepwise_module_completeness, fill = group)) +
+  # Add error bars (95% CI using bootstrapping), colored by group
+  stat_summary(aes(color = group), fun.data = mean_cl_boot, geom = "errorbar", width = 0.2, size = 0.8) +
+  # Add mean points, colored by group
+  stat_summary(aes(fill = group), fun = mean, geom = "point", size = 5, shape = 21, color = "black") +
+  # Labels & theme
+  labs(title = "Metabolic Module Completeness (KEGG)", 
+       x = "Population category", 
+       y = "Completeness (0 to 1)") +
+  scale_color_manual(values = c("susceptible" = "#808080", "resistant" = "#B22222")) +
+  scale_fill_manual(values = c("susceptible" = "#808080", "resistant" = "#B22222")) +
+  scale_x_discrete(labels = c("resistant" = "Resistant", "susceptible" = "Susceptible")) +
+  #scale_y_continuous(limits = c(0.35, 0.75)) +  # Ensure full Y-axis from 0 to 1
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 0.8, size = 22, face = "bold"),
+    axis.line = element_line(size = 0.8),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.text.x = element_text(size = 14, color = "black"),
+    legend.position = "none",
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+print(figure_3A)
+# save 
+ggsave(filename = "../R output/Figures/Figure_3A_KEGGcompleteness.jpg", plot = figure_3A, width = 7, height = 7, dpi = 300, units = "in")
+```
+Metabolic module completeness of resistant (red) and susceptible (gray) populations. Mean completeness (±95% CI) is higher in resistant populations (p < 0.001, Wilcoxon test), indicating functional differentiation in the metabolic niche space.
+
+
+For resistant populations, run PCoA of overrepresented KEGG modules related to energy and amino acid metabolism as they emerge as key
+functions overrepresented in resistant populations. The goal here is to assess whether these functional traits are structured by taxonomy (same as Pfam analysis). 
+```{r, warning=FALSE, message=FALSE}
+# prepare data for PCoA
+kegg_pcoa_data <- kegg_merged %>%
+  dplyr::filter(group == "resistant", module_category %in% c("Amino acid metabolism", "Energy metabolism")) %>%
+  dplyr::select(bin_name, module_name, stepwise_module_completeness) %>%
+  pivot_wider(names_from = module_name, values_from = stepwise_module_completeness, values_fill = 0) %>%
+  column_to_rownames("bin_name")  # Convert bin names to row names
+
+dist_matrix <- vegdist(kegg_pcoa_data, method = "bray") # Bray-Curtis dissimilarity
+pcoa_result <- cmdscale(dist_matrix, k = 2, eig = TRUE) # run PCoA
+
+# convert into df
+pcoa_df <- as.data.frame(pcoa_result$points)
+colnames(pcoa_df) <- c("PCoA1", "PCoA2")
+pcoa_df$bin_name <- rownames(kegg_pcoa_data)
+
+res_phyla <- sig_bins %>% filter(group == "resistant") 
+
+# remove redundant rows and keep bin_name & phylum info
+phylum_info <- bins_extendedinfo %>%
+  dplyr::filter(bin %in% res_phyla$bin_name) %>%  
+  dplyr::select(bin, t_phylum) %>%  
+  dplyr::rename(bin_name = bin) %>% 
+  distinct()
+
+pcoa_df <- left_join(pcoa_df, phylum_info, by = "bin_name") # merge phylum for coloring
+```
+
+FigureS3C: PCoA of overrepresented KEGG in resistant populations
+```{r, warning=FALSE, message=FALSE}
+# plot
+Figure_S3C <- ggplot(pcoa_df, aes(x = PCoA1, y = PCoA2, color = t_phylum)) +
+  geom_point( alpha = 0.7, size = 4) +
+  labs(
+    title = "PCoA of Key Module Categories Overrepresented in Resistant Populations",
+    x = paste0("PCoA1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "% Variance)"),
+    y = paste0("PCoA2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "% Variance)")
+  ) +
+  theme_minimal() +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+    axis.line = element_blank(),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.text.x = element_text(size = 14, color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.key.size = unit(3,"line"),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(), 
+    panel.border = element_rect(colour = "black", fill=NA, size=1)
+  )
+Figure_S3C
+# save
+ggsave(filename = "../R output/Figures/Figure_S3C_KEGGPCoA_keycategories_taxonomy.jpg", plot = Figure_S3C,width = 13, height = 7, dpi = 300, units = "in")
+```
+
+```{r, warning=FALSE, message=FALSE}
+permanova_phylum <- adonis2(dist_matrix ~ t_phylum, data = pcoa_df, permutations = 999, method = "bray") # PERMANOVA based on taxonomy
+dispersion_test <- betadisper(dist_matrix, pcoa_df$t_phylum) # taxonomic dispersion test to validate PERMANOVA
+
+# print 
+anova(dispersion_test)  
+print(permanova_phylum)
+```
+Results indicate marginally significant clustering by taxonomy (PERMANOVA, p-value - ) but this is confounded by taxonomic dispersion (ANOVA, p-value = 0.043).
+
+-------------------------------------------------------------COG analysis--------------------------------------------------------------------
+
+Prep COG data
+```{r, warning=FALSE, message=FALSE}
+pfam <- read.delim("~/Documents/UMich/DataAnalysis/metagenomics_run/pfam/function.txt") # load data
+
+# filter COG data
+filtered_cog <- pfam %>%
+  filter(source %in% c("COG20_CATEGORY", "COG20_PATHWAY"))
+gene.calls.txt <- read.delim("~/Documents/UMich/DataAnalysis/metagenomics_run/gene-calls-txt") # read gene calls
+
+# combine contig info
+tmp <- gene.calls.txt %>% 
+  dplyr::select(gene_callers_id, contig) 
+cog_summary <- inner_join(filtered_cog, tmp, by = "gene_callers_id")
+
+cog_summary <- cog_summary %>% mutate(bin = str_extract(contig, "^[^-]+")) # extract bin info from contig info
+
+# filter MAGs
+cog_MAGs <- cog_summary %>%   
+  dplyr::filter(str_detect(bin, "_MAG_")) %>% 
+  dplyr::rename(bin_name = bin)
+merged_cog <- inner_join(cog_MAGs, sig_bins, by = "bin_name") # merge cog summary with bin coverage change significance
+
+# split COG category and pathway results into 2 dfs.
+df_cog_category <- merged_cog %>% 
+  filter(source == "COG20_CATEGORY")
+df_cog_pathway <- merged_cog %>% 
+  filter(source == "COG20_PATHWAY")
+
+# split function and accession cols (basically remove !!!)
+# define a function to split and expand based on '!!!' delimiter 
+expand_rows <- function(df, split_columns) {
+  # Split the specified columns
+  split_df <- df %>%
+    mutate(across(all_of(split_columns), ~strsplit(as.character(.), "!!!", fixed = TRUE))) %>%
+    # Expand the data frame so that each list element gets its own row
+    unnest(cols = all_of(split_columns))
+
+  return(split_df)
+}
+
+# apply the function to the cog category df
+expanded_df_cog <- expand_rows(df_cog_category, c("accession", "function."))
+
+# save this df
+write.csv(expanded_df_cog, "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/expanded_df_cog.csv")
+```
+
+```{r, warning=FALSE, message=FALSE}
+# count occurrences
+cog_category_counts <- expanded_df_cog %>%
+  group_by(group, function.) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = group, values_from = count, values_fill = 0)
+
+# count unique MAGs in each group
+unique_mags_per_group <- expanded_df_cog %>%
+  group_by(group) %>%
+  summarise(unique_MAGs = n_distinct(bin_name))
+
+# normalize the number of MAGs in each group
+cog_category_counts <- cog_category_counts %>%
+  mutate(
+    decrease_norm = susceptible / unique_mags_per_group$unique_MAGs[unique_mags_per_group$group == "susceptible"],
+    increase_norm = resistant / unique_mags_per_group$unique_MAGs[unique_mags_per_group$group == "resistant"]
+  )
+
+# calculate fold change (resistant/susceptible)
+cog_category_counts <- cog_category_counts %>%
+  mutate(fold_change = decrease_norm / increase_norm) %>%
+  arrange(desc(fold_change))
+
+print(cog_category_counts)
+```
+
+Calculate COG proportions
+```{r, warning=FALSE, message=FALSE}
+# count total COG per MAG
+total_cogs_per_mag <- expanded_df_cog %>%
+  group_by(bin_name) %>%
+  summarise(total_cogs = n(), .groups = "drop")
+
+# count occurrences of each COG category per MAG
+cog_counts_per_mag <- expanded_df_cog %>%
+  group_by(bin_name, function.) %>%
+  summarise(count = n(), .groups = "drop")
+
+# merge dfs to get proportion of each COG per MAG
+cog_proportions <- cog_counts_per_mag %>%
+  left_join(total_cogs_per_mag, by = "bin_name") %>%
+  mutate(proportion = count / total_cogs)
+
+# identify COGs shared between both groups
+shared_cogs <- expanded_df_cog %>%
+  group_by(function., group) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = group, values_from = count, values_fill = 0) %>%
+  filter(susceptible > 0 & resistant > 0) %>%  # Keep only COGs found in both groups
+  pull(function.)
+
+# filter proportions to only shared COGs
+cog_proportions_shared <- cog_proportions %>%
+  filter(function. %in% shared_cogs)
+
+# add group information
+cog_proportions_shared <- expanded_df_cog %>%
+  dplyr::select(bin_name, group) %>%
+  distinct() %>%
+  inner_join(cog_proportions_shared, by = "bin_name")
+
+# compute mean proportion for each shared COG function
+cog_proportion_summary <- cog_proportions_shared %>%
+  dplyr::group_by(function., group) %>%
+  dplyr::summarise(mean_proportion = mean(proportion, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = group, values_from = mean_proportion, values_fill = 0, names_prefix = "mean_")
+
+# Wilcoxon Rank-Sum test for each shared COG
+wilcox_test_results_cog <- cog_proportions_shared %>%
+  dplyr::group_by(function.) %>%
+  dplyr::summarise(
+    p_value = wilcox.test(proportion[group == "susceptible"], proportion[group == "resistant"])$p.value,
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(p_value < 0.05)  # Keep only significantly different COGs
+
+# merge only significant COGs
+final_results_cog <- wilcox_test_results_cog %>%
+  left_join(cog_proportion_summary, by = "function.")
+
+# view final results with correct number of rows
+print(final_results_cog)
+```
+
+```{r, warning=FALSE, message=FALSE}
+# save
+write.csv(cog_proportions_shared, "../R output/cog_proportions_shared.csv")
+write.csv(final_results_cog, "../R output/final_results_cog.csv")
+```
+
+
+Figure 3B showing common KEGG modules and COG functions enriched. First prepare data.
+```{r, warning=FALSE, message=FALSE}
+# compute mean KEGG module completeness per function
+kegg_summary <- kegg_merged %>%
+  dplyr::filter(module_class == "Pathway modules") %>% 
+  dplyr::group_by(module_category, group) %>% 
+  dplyr::summarise(mean_completeness = mean(stepwise_module_completeness, na.rm = TRUE), .groups = "drop")
+
+# select relevant KEGG categories
+selected_kegg <- kegg_summary %>%
+  dplyr::filter(module_category %in% c("Amino acid metabolism", "Energy metabolism")) %>%
+  dplyr::rename(Module_Category_KEGG = module_category, 
+         Mean_Completeness = mean_completeness, 
+         Population_Category = group)
+
+# select relevant COG categories
+selected_cog <- final_results_cog %>%
+  dplyr::filter(function. %in% c("Amino acid transport and metabolism", "Energy production and conversion")) %>%
+  dplyr::rename(COG_Category = function.) %>%
+  pivot_longer(cols = starts_with("mean_"), names_to = "Population_Category", values_to = "Mean_Proportion") %>%
+  dplyr::mutate(Population_Category = ifelse(Population_Category == "mean_resistant", "resistant", "susceptible"))  
+
+# combine KEGG & COG into a single dataframe
+combined_kegg_cog <- bind_rows(
+  selected_kegg %>% dplyr::mutate(Source = "KEGG"),
+  selected_cog %>% dplyr::rename(Module_Category_KEGG = COG_Category) %>% mutate(Source = "COG")
+)
+
+# pivot data for proper faceting
+df_long_combined <- combined_kegg_cog %>%
+  pivot_longer(cols = c(Mean_Completeness, Mean_Proportion), 
+               names_to = "Metric", 
+               values_to = "Enrichment_Score") %>%
+  dplyr::filter((Source == "KEGG" & Metric == "Mean_Completeness") | 
+         (Source == "COG" & Metric == "Mean_Proportion")) %>% 
+  dplyr::mutate(Module_Category_Facet = case_when(
+    Source == "KEGG" & Module_Category_KEGG == "Amino acid metabolism" ~ "Amino Acid Metabolism",
+    Source == "KEGG" & Module_Category_KEGG == "Energy metabolism" ~ "Energy Metabolism",
+    Source == "COG" & Module_Category_KEGG == "Amino acid transport and metabolism" ~ "Amino Acid\nTransport & Metabolism",
+    Source == "COG" & Module_Category_KEGG == "Energy production and conversion" ~ "Energy\nProduction & Conversion",
+    TRUE ~ NA_character_  # Drop rows that don't belong in the respective facet
+  )) %>%
+  drop_na(Module_Category_Facet) %>%  # Remove unwanted rows
+  dplyr::mutate(Module_Category_Facet = factor(Module_Category_Facet, levels = unique(Module_Category_Facet)))  # Ensure correct factor ordering
+```
+
+Make the figure.
+```{r, warning=FALSE, message=FALSE}
+# generate faceted bar plot with correctly filtered x-axis labels
+figure_3B <- ggplot(df_long_combined, aes(x = Module_Category_Facet, 
+                                 y = Enrichment_Score, 
+                                 fill = Population_Category)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.6) +  
+  facet_wrap(~ Source, scales = "free", 
+             labeller = labeller(Source = c("KEGG", "COG"))) +
+  labs(title = "Key Functional Categories Overrepresented in Resistant Populations", 
+       y = "", 
+       x = "Functional Categories",  
+       fill = "Population Category") +  
+  scale_fill_manual(values = c("susceptible" = "#808080", "resistant" = "#B22222")) +  
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 8, face = "bold", size = 22),
+    plot.margin = ggplot2::margin(50, 50, 10, 10),  
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14),  
+    axis.text.x = element_text(size = 14),  
+    axis.line = element_line(size = 0.8),
+    legend.position = "bottom",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 16, face = "bold"), 
+    panel.spacing = unit(1.5, "lines"),  
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.background = element_blank(),
+    panel.background = element_rect(fill = "white")
+  )
+
+# print and save
+print(figure_3B)
+ggsave(filename = "../R output/Figures/Figure_3B_KEGG_COG_diffAbundance.jpg", 
+       plot = figure_3B, width = 14, height = 7, dpi = 600, units = "in")
+```
+
+
+Supplemental plot (S3A) for all overrepresented KEGG categories
+```{r, warning=FALSE, message=FALSE}
+# define custom colors for population categories
+custom_colors <- c("resistant" = "#B22222", "susceptible" = "#808080")
+
+# create KEGG enrichment plot
+Figure_S3A <- ggplot(kegg_summary, aes(x = mean_completeness, y = module_category, fill = group)) +
+  geom_bar(stat = "identity", position = position_dodge2(width = 0.2, preserve = "single"), width = 0.7) +  
+  scale_fill_manual(values = custom_colors, name = "Population Category") +  
+  labs(
+    title = "Differential Abundance of Overrepresented KEGG Categories",
+    x = "Mean Module Completeness",
+    y = "KEGG Functional Category"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 0.6, face = "bold", size = 22),
+    plot.margin = ggplot2::margin(50, 100, 10, 10),  
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 10),  
+    axis.text.x = element_text(size = 14),
+    axis.line = element_line(size = 0.8),
+    legend.position = "bottom",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# save the KEGG plot
+ggsave(filename = "../R output/Figures/Figure_S3A_allKEGG_enriched.jpg", 
+       plot = Figure_S3A, 
+       width = 15, height = 10, dpi = 300, units = "in")
+
+# print the plot
+print(Figure_S3A)
+```
+
+Supplemental plot for COGs.
+```{r, warning=FALSE, message=FALSE}
+# long format
+long_format_cog <- final_results_cog %>% 
+  pivot_longer(cols = c(mean_resistant, mean_susceptible), 
+               names_to = "group", 
+               values_to = "mean_proportion") %>% 
+  dplyr::select(function., group, mean_proportion) %>% 
+  dplyr::rename(cog_category = function., population_category = group)
+
+# replace labels
+long_format_cog <- long_format_cog %>% 
+  dplyr::mutate(population_category = case_when(population_category == "mean_resistant" ~ "Resistant", 
+                                         population_category == "mean_susceptible" ~ "Susceptible")
+  )
+
+custom_colors <- c("Resistant" = "#B22222", "Susceptible" = "#808080")
+
+# enrichment plot
+Figure_S3B <- ggplot(long_format_cog, aes(x = mean_proportion, y = cog_category, fill = population_category)) +
+  geom_bar(stat = "identity", position = position_dodge2(width = 0.2, preserve = "single"), width = 0.7) + 
+  geom_bar(stat = "identity", position = position_dodge2(width = 0.2, preserve = "single"), width = 0.7) +  
+  scale_fill_manual(values = custom_colors, name = "Population Category") + 
+  labs(
+    title = "Differential Abundance of Overrepresented COG Categories",
+    x = "Relative Abundance",
+    y = "COG Functional Category"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+    plot.margin = ggplot2::margin(50, 100, 10, 10),  
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 10),  
+    axis.text.x = element_text(size = 14),
+    axis.line = element_line(size = 0.8),
+    legend.position = "bottom",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# save the COG plot
+ggsave(filename = "../R output/Figures/Figure_S3B_Enriched_COG.jpg", 
+       plot = Figure_S3B, 
+       width = 15, height = 10, dpi = 300, units = "in")
+
+# Print the plot
+print(Figure_S3B)
+```
+
+
+
+
+
+

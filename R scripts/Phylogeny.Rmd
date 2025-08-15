@@ -1,0 +1,220 @@
+---
+title: "phylogeny"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(ape)
+library(ggtree)
+library(phytools)
+library(phylosignal)
+library(vegan)
+library(nlme)
+```
+
+Read bininfo df and the newick file
+```{r}
+bins_extendedinfo <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/bins_extendedinfo.csv")
+tree <- read.tree("~/Documents/UMich/papers/GrowthDefenseTradeOff/other output/Phylogeny/phylogenomic-tree.txt")
+```
+
+Prune the newick file to include bins that were retained detection filter (0.7)
+```{r}
+# extract unique bins and prune tree
+unique_bins <- unique(bins_extendedinfo$bin)
+pruned_tree <- drop.tip(tree, setdiff(tree$tip.label, unique_bins))
+
+# save pruned tree
+write.tree(pruned_tree, file = "../R output/Phylogeny/pruned_tree.txt")
+```
+
+Create coverage and taxonomy annotation files to create a phylogenetic tree in iTOL 
+First, create the taxonomy annotation file
+```{r}
+# define phylum colors
+phyla_colors <- c(
+  Proteobacteria = "#E1A91F",
+  Bacteroidota = "#A6BF96",
+  Verrucomicrobiota = "#F4B5C8",
+  Planctomycetota = "#B39BC8",
+  Unknown = "#D3D3D3", 
+  Actinobacteriota = "#F4A259",
+  Cyanobacteria = "#78C2BE", 
+  Myxococcota = "#C7B198",
+  Gemmatimonadota = "#8D8DAA",
+  Chloroflexota = "#BCCF02"
+)
+
+# create iTOL-specific header for taxonomy
+header_tax <- c(
+  "DATASET_RANGE",
+  "SEPARATOR COMMA",
+  "DATASET_LABEL,Taxonomy",
+  "RANGE_TYPE,box",
+  "RANGE_COVER,label",
+  "SHOW_LABELS,0",
+  "LEGEND_TITLE,Phylum Colors",
+  paste0("LEGEND_SHAPES,", paste(rep("1", length(phyla_colors)), collapse = ",")),
+  paste0("LEGEND_COLORS,", paste(phyla_colors, collapse = ",")),
+  paste0("LEGEND_LABELS,", paste(names(phyla_colors), collapse = ",")),
+  "DATA"
+)
+
+
+taxonomy_ranges <- bins_extendedinfo %>%
+  mutate(
+    t_phylum = ifelse(is.na(t_phylum), "Unknown", t_phylum), # Replace NAs with "Unknown"
+    FILL_COLOR = phyla_colors[t_phylum] # assign phylum colors
+  ) %>%
+  distinct(bin, FILL_COLOR) %>%
+  rename(START_NODE_ID = bin) %>%
+  mutate(
+    END_NODE_ID = START_NODE_ID, 
+    GRADIENT_COLOR = "", # no gradient
+    LINE_COLOR = FILL_COLOR, # border color
+    LINE_STYLE = "solid", # solid border
+    LINE_WIDTH = 1 # default border width
+  ) %>%
+  select(
+    START_NODE_ID, END_NODE_ID, FILL_COLOR, GRADIENT_COLOR, LINE_COLOR,
+    LINE_STYLE, LINE_WIDTH
+  )
+
+# combine header and data
+itol_data_tax <- c(
+  header_tax,
+  apply(taxonomy_ranges, 1, paste, collapse = ",")
+)
+
+# save
+writeLines(itol_data_tax, "../R output/Phylogeny/taxonomy_dataset_range.txt")
+```
+
+
+Next, create annotation file for Q:C ratio - resistance trait. But we need to scale the data to make sure that Q:C values are between -1 to 1 with 0 as midpoint for mapping the trait on phylogeny in itol. This will map susceptibility (Q:C < 1) to [-1, 0) and resistance (Q:C > 1) to (0, 1]. Q:C = 1 will be explicitly set as the neutral midpoint (0) and indicated with white color.
+```{r}
+# calculate resistance trait (quagga_mean/control_mean)
+bins_extendedinfo <- bins_extendedinfo %>%
+  mutate(
+    resistance_trait = quagga_mean / control_mean
+  )
+
+# compute mean resistance trait across dates for each MAG
+resistance_metadata <- bins_extendedinfo %>%
+  group_by(bin) %>%
+  summarise(mean_resistance = mean(resistance_trait, na.rm = TRUE)) %>%
+  ungroup()
+
+# define min and max for scaling
+min_qc <- min(resistance_metadata$mean_resistance)
+max_qc <- max(resistance_metadata$mean_resistance)
+
+# scale values to [-1, 1]
+resistance_metadata_scaled <- resistance_metadata %>%
+  mutate(
+    scaled_resistance = ifelse(
+      mean_resistance < 1,
+      -((1 - mean_resistance) / (1 - min_qc)),  # Scale susceptibility to [-1, 0)
+      (mean_resistance - 1) / (max_qc - 1)     # Scale resistance to (0, 1]
+    )
+  )
+
+# define iTOL-specific header for gradient annotation
+header_qc <- c(
+  "DATASET_GRADIENT",
+  "SEPARATOR SPACE",
+  "DATASET_LABEL Resistance (Scaled -1 to 1)",
+  "COLOR #ff0000",                # dataset label color
+  "COLOR_MIN #D3D3D3",            # light gray for susceptibility
+  "COLOR_MAX #B22222",            # matte red for resistance
+  "USE_MID_COLOR 1",              # enable midpoint color
+  "COLOR_MID #FFFFFF",            # white for Q:C = 1 (neutral)
+  "DATA"
+)
+
+# combine header and scaled data
+itol_data_qc <- c(
+  header_qc,
+  paste(resistance_metadata_scaled$bin, resistance_metadata_scaled$scaled_resistance, sep = " ")
+)
+
+# Write the file
+writeLines(itol_data_qc, "../R output/Phylogeny/resistance_metadata_scaled_itol.txt")
+```
+
+Next, we will run check Pagel's lambda to test phylogenetic signals
+```{r}
+# aggregate feeding resistance by MAG
+agg_resistance <- bins_extendedinfo %>%
+  group_by(bin) %>%
+  summarise(
+    feeding_resistance = mean(resistance_trait, na.rm = TRUE),
+    t_domain = first(t_domain),
+    t_phylum = first(t_phylum),
+    t_class = first(t_class),
+    t_order = first(t_order),
+    t_family = first(t_family),
+    t_genus = first(t_genus),
+    t_species = first(t_species),
+    GC_content = mean(GC_content, na.rm = TRUE),
+    total_length = mean(total_length, na.rm = TRUE),
+  )
+```
+
+```{r}
+# check for bin labels and drop any extra labels before running stats (there should not be any extra tips since the tree was pruned) 
+tree <- drop.tip(tree, setdiff(tree$tip.label, agg_resistance$bin))
+agg_resistance <- agg_resistance[agg_resistance$bin %in% tree$tip.label, ]
+```
+
+```{r}
+# test for phylogenetic signal by assigning feeding resistance to tree tips
+trait <- setNames(agg_resistance$feeding_resistance, agg_resistance$bin)
+
+# Pagel's lambda
+lambda <- phylosig(tree, trait, method = "lambda")
+print(lambda)
+```
+Pagel's lambda indicates high clustering but visually it seems like clustering is fine scaled. Run Mantel's test, which comapares correlation between two distance matrices. 
+```{r}
+# calculate phylogenetic distance matrix from the pruned tree
+phylo_dist <- cophenetic(pruned_tree)
+
+# trait distance matrix
+trait_dist <- dist(resistance_metadata$mean_resistance)
+
+# perform Mantel's test with Pearson
+mantel_result <- mantel(phylo_dist, trait_dist, method = "pearson", permutations = 999)
+
+print("Mantel Test Result:")
+print(mantel_result)
+```
+
+Next, use PGLS to see if accounting for evolutionary history (GC and genome length) improves the prediction.
+```{r}
+# Create a phylogenetic correlation structure
+phylo_correlation <- corPagel(1, pruned_tree, form = ~bin)
+
+# Fit the PGLS model
+pgls_model <- gls(
+  feeding_resistance ~ GC_content + total_length, 
+  data = agg_resistance, 
+  correlation = phylo_correlation
+)
+
+# Summarize the PGLS model
+summary(pgls_model)
+```
+
+
+
+
+
+

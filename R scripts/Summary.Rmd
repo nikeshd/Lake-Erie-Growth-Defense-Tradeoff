@@ -1,0 +1,69 @@
+---
+title: "Summary"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r, warning=FALSE, message=FALSE}
+bins_extendedinfo <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/bins_extendedinfo.csv")
+```
+
+```{r, warning=FALSE, message=FALSE}
+# summarize taxonomy and presence across dates
+summary <- bins_extendedinfo %>%
+  group_by(bin, t_phylum, t_class, t_order, t_family, t_genus, t_species) %>%
+  summarise(presence = n(), .groups = 'drop')
+
+# Summarize percent completion, GC content, and percent redundancy
+quant_summary <- bins_extendedinfo %>%
+  group_by(bin) %>%
+  summarise(
+    percent_completion = mean(percent_completion, na.rm = TRUE),
+    GC_content = mean(GC_content, na.rm = TRUE),
+    percent_redundancy = mean(percent_redundancy, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Merge taxonomy and quality summaries
+mag_summary <- summary %>%
+  left_join(quant_summary, by = "bin")
+
+write.csv(mag_summary, "../R output/mag_summary.csv")
+```
+
+```{r}
+# calculate statistics
+unique_mags <- n_distinct(mag_summary$bin)
+avg_redundancy <- mean(mag_summary$percent_redundancy, na.rm = TRUE)
+redundancy_min <- min(mag_summary$percent_redundancy, na.rm = TRUE)
+redundancy_max <- max(mag_summary$percent_redundancy, na.rm = TRUE)
+avg_completion <- mean(mag_summary$percent_completion, na.rm = TRUE)
+completion_min <- min(mag_summary$percent_completion, na.rm = TRUE)
+completion_max <- max(mag_summary$percent_completion, na.rm = TRUE)
+avg_gc <- mean(mag_summary$GC_content, na.rm = TRUE)
+gc_min <- min(mag_summary$GC_content, na.rm = TRUE)
+gc_max <- max(mag_summary$GC_content, na.rm = TRUE)
+phyla_list <- unique(mag_summary$t_phylum)
+
+# print
+cat("**Summary of MAGs:**\n")
+cat("Unique number of MAGs:", unique_mags, "\n")
+cat("Average redundancy:", round(avg_redundancy, 2), "%\n")
+cat("Redundancy range:", round(redundancy_min, 2), "% -", round(redundancy_max, 2), "%\n")
+cat("Average completion:", round(avg_completion, 2), "%\n")
+cat("Completion range:", round(completion_min, 2), "% -", round(completion_max, 2), "%\n")
+cat("Average GC content:", round(avg_gc, 2), "%\n")
+cat("GC content range:", round(gc_min, 2), "% -", round(gc_max, 2), "%\n")
+cat("Phyla present:\n", paste(phyla_list, collapse = ", "), "\n")
+```
+

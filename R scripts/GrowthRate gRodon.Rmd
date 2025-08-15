@@ -1,0 +1,169 @@
+---
+title: "gRodon"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(gRodon)
+library(Biostrings)
+library(readr)
+library(tidyverse)
+library(effsize)
+library(boot)
+```
+
+
+Run gRodon
+```{r, warning=FALSE, message=FALSE}
+set.seed(123)
+dir_path <- "~/Documents/UMich/papers/GrowthDefenseTradeOff/fasta files/fasta_for_grodon/" # define dir
+fasta_files <- list.files(dir_path, pattern = "\\.fa$", full.names = TRUE) # list fasta files in the dir
+
+# function to process each file
+process_file <- function(file_path) {
+  # read DNA sequences
+  genes <- readDNAStringSet(file_path)
+  highly_expressed <- grepl("ribosomal protein", names(genes), ignore.case = TRUE)
+
+  # run gRodon prediction in a df
+  result <- as.data.frame(predictGrowth(genes, highly_expressed, mode = "metagenome_v2"))
+
+  # extract name and add to df
+  mag_name <- basename(file_path)
+  mag_name <- sub("\\.fa$", "", mag_name)  # remove extension
+  result$bin <- mag_name
+  
+  return(result)
+}
+
+# apply function to all files and combine results
+gRodon_results <- do.call(rbind, lapply(fasta_files, process_file))
+```
+
+Add significant bins info to the results df.
+```{r, warning=FALSE, message=FALSE}
+sig_bins <- read.delim("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/sig_bins.tsv")
+
+sig_bins <- sig_bins %>% 
+  rename_at("bin_name", ~'bin') # rename bin col
+gRodon_results <- inner_join(gRodon_results, sig_bins, by = "bin")
+gRodon_results$group[gRodon_results$group == "increase"] <- "Resistant"
+gRodon_results$group[gRodon_results$group == "decrease"] <- "Susceptible"
+write.csv(gRodon_results, "../R output/gRodon_results.csv") # save
+```
+
+Print summary statistics for each group.
+```{r, warning=FALSE, message=FALSE}
+summary_stats <- gRodon_results %>%
+  group_by(group) %>%
+  summarise(
+    count = n(),
+    mean_d = mean(d, na.rm = TRUE),
+    median_d = median(d, na.rm = TRUE),
+    sd_d = sd(d, na.rm = TRUE),
+    min_d = min(d, na.rm = TRUE),
+    max_d = max(d, na.rm = TRUE)
+  )
+print(summary_stats)
+```
+
+The groups have similar variartion in data but resistant MAGs tend to have higher growth rate at a glance. Run Wilxon test.
+```{r, warning=FALSE, message=FALSE}
+wilcox_test <- wilcox.test(d ~ group, data = gRodon_results, exact = FALSE)
+print(wilcox_test)
+```
+Key Result: 
+- W = 1198, p-value = 0.2246 
+- Not statistically significant: we do not have enough evidence to reject the null hypothesis, suggesting that the observed difference in intrinsic growth rates could be due to random variation rather than a true systematic difference between resistant and susceptible groups.
+
+
+Try bootstrapping (resistant group) and downsampling (susceptible) group. Wilcoxon is okay with unequal variance, but do this as well. 
+```{r, warning=FALSE, message=FALSE}
+set.seed(123)
+# function to compute mean growth rate for bootstrapped samples
+bootstrap_function <- function(data, indices) {
+  sample_data <- data[indices]
+  return(mean(sample_data, na.rm = TRUE))
+}
+
+# apply bootstrapping (1000 iterations) for resistant group
+resistant_boot <- boot(gRodon_results$d[gRodon_results$group == "resistant"], bootstrap_function, R = 1000)
+boot_ci <- boot.ci(resistant_boot, type = "perc") # confidence interval for bootstrapped mean
+print(boot_ci)
+```
+```{r, warning=FALSE, message=FALSE}
+set.seed(123)
+n_iterations <- 1000
+downsample_means <- numeric(n_iterations)
+
+for (i in 1:n_iterations) {
+  sampled_susceptible <- sample(gRodon_results$d[gRodon_results$group == "susceptible"], size = 15, replace = FALSE)
+  downsample_means[i] <- mean(sampled_susceptible, na.rm = TRUE)
+}
+
+# compute summary statistics for downsampled means
+downsample_summary <- data.frame(
+  mean = mean(downsample_means),
+  median = median(downsample_means),
+  sd = sd(downsample_means),
+  lower_CI = quantile(downsample_means, 0.025),
+  upper_CI = quantile(downsample_means, 0.975)
+)
+
+print(downsample_summary)
+```
+
+Conclusion: 
+- Descriptive statistics suggest that resistant populations tend to have a slightly higher growth rate (mean = 4.704, median = 4.663) compared to susceptible populations (mean = 4.229, median = 4.022). 
+- But Wilcoxon test results suggest that this null hypothesis cannot be rejected (p = 0.2246). Null hypothesis here is that there is no difference in central tendency between populations in these groups.
+- To account for unequal sample size, bootstrapping and downsampling methods were also used. Bootstrapping (resistant group only) indicated that the 95% percentile confidence interval for the mean growth rate in the resistant group was (3.914	5.400). Downsampling the susceptible group yielded a 95% CI for its mean growth rate of (3.521, 5.076). 
+- Taken together, the Wilcoxon result and partial overlap of the bootstrap and downsampling confidence intervals suggest no evidence for a meaningful difference in mean growth rates between populations resistant and suseptible to mussel predation. 
+
+
+Figure for gRodon
+```{r, warning=FALSE, message=FALSE}
+custom_colors <- c("resistant" = "#B22222", "susceptible" = "#808080") # custom colors 
+
+# create violin plot with median and IQR
+Figure_4A <- ggplot(gRodon_results, aes(x = group, y = d, fill = group)) +
+  geom_violin(trim = FALSE, alpha = 0.7, width = 0.8) +  # violin plot for distribution
+  stat_summary(fun = median, geom = "point", shape = 23, size = 4, fill = "white") +  # median
+  stat_summary(fun.data = function(y) { 
+    return(data.frame(ymin = quantile(y, 0.25), ymax = quantile(y, 0.75), y = median(y))) 
+  }, geom = "errorbar", width = 0.2, size = 1) +  # add IQR error bars
+  scale_fill_manual(values = custom_colors) +  # custom colors
+  labs(
+    title = "Intrinsic Growth Rates by Population Category",
+    x = "Population Category",
+    y = "Intrinsic Growth Rate (d)"
+  ) +
+  scale_x_discrete(labels = c("resistant" = "Resistant", "susceptible" = "Susceptible")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+    axis.line = element_line(size = 0.8),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.text.x = element_text(size = 14, color = "black"),
+    legend.position = "none",
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  ) 
+#  annotate("text", x = 1.5, y = max(gRodon_results$d, na.rm = TRUE) - 1, 
+#           label = "Resampled mean (Resistant): [CI = 3.914, 5.400]\n Downsampled mean (Susceptible): [CI = 3.521, 5.076]",
+#          size = 4, hjust = 1.5, vjust = -2.5, fontface = "bold")
+
+# save
+ggsave(filename = "../R output/Figures/Figure_4A_gRodon.jpg", plot = Figure_4A, width = 12, height = 7, dpi = 300, units = "in")
+
+# print
+Figure_4A
+```
+
+
+
+

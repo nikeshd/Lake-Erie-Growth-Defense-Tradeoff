@@ -1,0 +1,74 @@
+---
+title: "anti-smash"
+output: html_document
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(reshape2)
+library(ggforce)
+library(rjson)
+```
+
+Load the output from anti-smash.
+```{r, warning=FALSE, message=FALSE}
+# read JSON file
+json_file <- "../other output/AntiSmash/combined_contigs_resistant/combined_contigs_resistant.json"
+json_data <- fromJSON(file = json_file)
+```
+
+Extract BGCs only from records that have them
+```{r, warning=FALSE, message=FALSE}
+bgc_table <- map_df(json_data$records, function(record) {
+  if (!is.null(record$areas) && length(record$areas) > 0) {  # Ensure the record contains BGCs
+    map_df(record$areas, function(area) {
+      tibble(
+        Record_ID = record$name,  # Contig or MAG ID
+        Region_ID = area$area_number,
+        BGC_Type = ifelse(!is.null(area$product), paste(area$product, collapse = ", "), "Unknown"),
+        Start = area$start,
+        End = area$end
+      )
+    })
+  }
+})
+# write_csv(bgc_table, "../R output/antismash_bgc_results.csv")
+
+# extract MAG ID from `Record_ID` in `bgc_table`
+bgc_table <- bgc_table %>%
+  mutate(MAG_ID = substr(Record_ID, 1, 14)) 
+
+bins_extendedinfo <- read_csv("~/Documents/UMich/DataAnalysis/metagenomics_run/output/dfs/bins_extendedinfo.csv")
+
+bgc_mags <- unique(bgc_table$MAG_ID)
+
+bgc_phyla <- bins_extendedinfo %>% 
+  subset(bin %in% bgc_mags) %>%
+  dplyr::select(bin, t_phylum, t_genus) %>% 
+  group_by(bin) %>% 
+  unique %>% 
+  rename(MAG_ID = bin)
+
+bgc_table <- left_join(bgc_table, bgc_phyla, by = "MAG_ID")
+
+bgc_table <- bgc_table %>% 
+  select(MAG_ID, BGC_Type, Start, End, t_phylum, t_genus)
+
+write.csv(bgc_table, "../R output/TableS4.csv")
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+bgc_abundance <- bgc_table %>%
+  count(MAG_ID, name = "BGC_Count")
+print(bgc_abundance)
+```
+
+
+

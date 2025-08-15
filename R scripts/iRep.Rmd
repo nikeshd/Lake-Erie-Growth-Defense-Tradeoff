@@ -1,0 +1,495 @@
+---
+title: "iRep"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(vegan)
+library(lme4)
+library(lmerTest)
+library(rstatix)
+library(ggridges)
+library(patchwork)
+library(readxl)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+bins_extendedinfo <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/bins_extendedinfo.csv")
+random_mags <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/other output/iRep/irep_randomSelection.csv") %>% 
+  dplyr::select(bin_name, group) %>% 
+  dplyr::rename(mag = bin_name)
+metadata <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/other output/metadata.csv")
+```
+
+
+Summarize the MAG list of interest to create a .csv file with various sam - mag pairs for irep runs.
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# subset 15 resistant MAGs and 15 randomly selected susceptible MAGs
+irep_mags <- bins_extendedinfo %>%
+  filter(bin %in% random_mags$mag) %>% 
+  select(bin, date) %>% 
+  rename(mag = bin)
+
+# summarize MAG counts based on their occurrence (across dates)
+irep_mags %>% group_by(date) %>% summarise(unique_mags = n_distinct(mag))
+mag_counts <- irep_mags %>% group_by(mag) %>% summarise(count = n())
+sum(mag_counts$count == 3)
+sum(mag_counts$count == 2)
+sum(mag_counts$count == 1)
+
+# extract sample metadata to create mag-sam pairs to run irep 
+irep_mag_meta <- metadata %>% 
+  filter(date != "7/31/19") %>% 
+  select(sample, date)
+
+# merge MAG and sample info
+mag_sam <- merge(irep_mags, irep_mag_meta, by = "date")
+colnames(mag_sam) <- c("date", "mag", "sam")
+
+# add "_sorted.sam" so that the slurm script can map sam files properly
+mag_sam_modified <- mag_sam %>% 
+  select(mag, sam) %>% 
+  mutate(sam = paste0(sam, "_sorted.sam"))
+```
+There are over 20 MAGs in each date (22, 28, and 28). Out of 30 MAGs being considered here, 21 appear in all three, 6 in two, and 3 in one date.
+ 
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# save the mag_sam_modified df to run irep
+#write.csv(mag_sam_modified, "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/irep_mag_sam.csv", row.names = FALSE)
+```
+
+
+Load irep results.
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# specify path for irep output files
+cleaned_irepresult_folder <- "~/Documents/UMich/papers/GrowthDefenseTradeOff/other output/iRep/final_ireprun/cleaned_output_bymag/"
+
+# list all .tsv files in the folder
+tsv_files <- list.files(path = cleaned_irepresult_folder, pattern = "_cleaned.tsv$", full.names = TRUE)
+
+# read .tsv files and merge into a single df
+irep_results <- lapply(tsv_files, read.delim) %>%
+  bind_rows()
+
+# remove the ".irep" suffix from sample_assembly
+irep_results$sample_assembly <- sub("\\.irep$", "", irep_results$sample_assembly)
+
+# subset 15 resistant MAGs and 15 randomly selected susceptible MAGs
+irep_results <- irep_results %>%
+  filter(genome %in% random_mags$mag) %>% 
+  rename(mag = genome,
+         irep_unfiltered = unfiltered_index_of_replication, 
+         irep_filtered = index_of_replication_filtered, 
+         irep_raw = raw_index_of_replication_no_gc_correction)
+
+# add date and treatment info 
+irep_results <- merge(irep_results, metadata[, c("sample", "date", "treatment")], 
+                             by.x = "sample_assembly", by.y = "sample", 
+                             all.x = TRUE)
+
+# filter taxonomy info
+tax_irepmags <- bins_extendedinfo %>%
+  filter(bin %in% unique(irep_results$mag)) %>%
+  select(bin, t_phylum, t_class, t_order, t_family, t_genus, t_species) %>%
+  distinct() %>% 
+  rename(mag = bin)
+irep_results <- merge(irep_results, tax_irepmags, by = "mag")
+
+# add response category
+irep_results <- merge(irep_results, random_mags, by = "mag")
+irep_results <- irep_results %>% 
+  dplyr::rename(response_category = group)
+
+# sanity check; num of unique - genomes, sample_assmeblies, and mag-sam pairs
+length(unique(irep_results$mag))
+length(unique(irep_results$sample_assembly))
+nrow(unique(irep_results[c("mag", "sample_assembly")]))
+```
+
+This matches what we would expect. We have 30 MAGs (15 resistant, 15 randomly picked susceptible), 22 assemblies, and 574 irep runs.
+
+
+Compare median between two categories for randomly selected MAGs
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+res_irep_results <- irep_results %>% 
+  filter(response_category == "resistant") %>% 
+  select(irep_unfiltered) %>% 
+  pull()
+
+sus_irep_results <- irep_results %>% 
+  filter(response_category == "susceptible") %>% 
+  select(irep_unfiltered) %>% 
+  pull()
+
+# descriptive stats
+res_mean <- mean(res_irep_results)
+res_median <- median(res_irep_results)
+res_sd <- sd(res_irep_results)
+res_range <- range(res_irep_results)
+
+sus_mean <- mean(sus_irep_results)
+sus_median <- median(sus_irep_results)
+sus_sd <- sd(sus_irep_results)
+sus_range <- range(sus_irep_results)
+
+
+cat("Resistant MAGs irep values - Mean:", res_mean, 
+    ", Median:", res_median, ", Stdev:", res_sd, ", Range:", res_range, "\n")
+cat("Susceptible MAGs irep values - Mean:", sus_mean, 
+    ", Median:", sus_median, ", Stdev:", sus_sd, ", Range:", sus_range, "\n")
+```
+The mean indicates that susceptible populations have higher growth rate, opposite of the growth-defense trade-off hypothesis.
+
+Basic non-parametric stats
+```{r, echo=FALSE, warning=FALSE}
+# Wilcoxon rank-sum test
+irep_wilcox_test <- wilcox.test(res_irep_results, sus_irep_results, exact = FALSE)
+irep_wilcox_test
+```
+p-value is extremely small (0.00003321), indicating that (counter to hypothesis, if anything) resistant populations have a higher median growth rate. 
+
+
+Use mixed effects models since intrinsic variation in growth rates (at the mag level, due to date etc.) potentially introduces variation.
+```{r, echo=FALSE, warning=FALSE, warning=FALSE}
+# convert categorical variables into factors
+irep_results$response_category <- as.factor(irep_results$response_category)
+irep_results$treatment <- as.factor(irep_results$treatment)
+irep_results$date <- as.factor(irep_results$date)
+```
+
+Below, random effect is grouped by MAG. This avoids introducing bias in the fixed effect estimates by accounting for intrinsic variability at the individual MAG level.
+```{r, echo=FALSE, warning=FALSE}
+# Model response_category as fixed effect and genome as random effect for irep_unfiltered values
+model_unfiltered_1 <- lmer(irep_unfiltered ~ response_category + (1 | mag), data = irep_results)
+summary(model_unfiltered_1)
+```
+
+Results:
+
+Fixed Effects: 
+- Intercept (Estimate = 2.8805). This represents the baseline reference (in this case, baseline irep value is for the resistant populations). So an average resistant MAG has an irep value of 2.88 in our data. 
+- response_categorysusceptible (Estimate = -0.2447) represents Δ irep (susceptible - resistant MAGs). Thus, on average, susceptible MAGs have a 0.2447 irep unit lower than resistant MAGs. However, this effect is not significant (p = 0.251), suggesting no strong evidence for the difference in instantaneous growth rates between resistant and susceptible populations in this model
+- Residual variance (0.4578) represents the variability that remains unexplained by the model. 
+
+Random effects: 
+- Variance = 0.2999 and Std.Dev. = 0.5477. This indicates that there is quite a lot variability in the irep values among unique MAGs.
+
+Biological interpretation:
+- The hypothesis of a growth-defense trade-off suggests that resistant populations should grow slower due to growth-defense trade-offs. However, we see an opposite trend here, where susceptible MAGs grow slightly slower (-0.2447). However, the lack of statistical significance (0.251) and large standard error (0.2087) indicate that a different model might fit better. Results from this model imply that - a) growth-defense trade-offs may not strongly structure growth traits in this system b) environmental or experimental factors may mitigate or relax the trade-offs constraints. c) resistant MAGs have evolved mechanisms that minimize growth penalties while maintaining grazing resistance.
+
+Next, 
+1) Visualize residuals against date and treatment to identify patterns of heterogeneity. Temporal trends (Residuals vs. Date) or difference between categories (Residuals vs. Treatment) will suggest the need to include date and/or treatment to the model.
+2) Check for any potential interactions between variables.
+
+```{r, echo=FALSE, warning=FALSE}
+# extract residuals from the model
+residuals_unfiltered_1 <- residuals(model_unfiltered_1)
+
+# create separate residuals df
+residuals_m1 <- data.frame(
+  mag = irep_results$mag,
+  date = irep_results$date,
+  treatment = irep_results$treatment,
+  response_category = irep_results$response_category,
+  residuals = residuals_unfiltered_1
+)
+
+# plot residuals vs. date
+ggplot(residuals_m1, aes(x = as.Date(date, format = "%m/%d/%y"), y = residuals)) +
+  geom_point() +
+  geom_smooth(method = "loess", color = "red", se = FALSE) +
+  labs(title = "Residuals vs. Date", x = "Date", y = "Residuals") +
+  theme_minimal()
+
+# plot residuals vs. treatment
+ggplot(residuals_m1, aes(x = treatment, y = residuals)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(title = "Residuals vs. Treatment", x = "Treatment", y = "Residuals") +
+  theme_minimal()
+
+# plot residuals by date and treatment
+ggplot(residuals_m1, aes(x = as.Date(date, format = "%m/%d/%y"), y = residuals, color = treatment)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(title = "Residuals by Date and Treatment", x = "Date", y = "Residuals", color = "Treatment") +
+  theme_minimal()
+```
+- Residuals increase over time for date, suggesting temporal variability in irep values not captured by the initial model. We will add date in the model (add as a fixed effect for linear trends or as a random effect for batch effects).  
+- Residuals for quagga are higher than control, implying that the mussel treatment may be influencing irep values.
+- Both control and quagga following similar trends over time indicates that the effect of treatment (on irep values) does not vary with date. Therefore, an interaction term between treatment and date is not necessary. However, the inclusion of both date and treatment in the model is still warranted to capture their influence on irep values. 
+
+- Now check potential interaction between response category and treatment. Basically, are the irep values of the populations in different response_category groups (resistant vs susceptible) being affected differently by the mussel treatment? If irep values are capturing how populations in these categories respond to feeding, the difference in their response may suggest plasticity of adjusting growth rate as an ecological strategy.     
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# line plot of group means
+ggplot(irep_results, aes(x = treatment, y = irep_unfiltered, color = response_category, group = response_category)) +
+  stat_summary(fun = mean, geom = "line", size = 1) +
+  stat_summary(fun = mean, geom = "point", size = 3) +
+  labs(title = "Mean irep Values by Treatment and Response Category",
+       x = "Treatment", y = "Mean Unfiltered Index of Replication") +
+  theme_minimal()
+
+# calculate mean irep values for each response category and treatment
+aggregate(irep_unfiltered ~ treatment + response_category, data = irep_results, mean)
+```
+The shift in mean irep value, in response to quagga treatment is 0.2 for resistant and 0.64 for susceptible populations.
+This implies that an interaction term between response category and treatment should be included in the model. 
+
+Explore the date effect a bit further to see whether to makes sense to add it as fixed effect or random effect.
+```{r, echo=FALSE, warning=FALSE}
+# create a dissimilarity matrix (e.g., Bray-Curtis) for irep values
+dissim_matrix <- vegdist(irep_results$irep_unfiltered, method = "bray")
+
+# perform PCoA
+pcoa_result <- cmdscale(dissim_matrix, eig = TRUE, k = 2)
+
+# convert results to a data frame for plotting
+pcoa_df <- as.data.frame(pcoa_result$points)
+colnames(pcoa_df) <- c("PCoA1", "PCoA2")
+pcoa_df$date <- irep_results$date  # Add dates for labeling
+
+# plot PCoA
+ggplot(pcoa_df, aes(x = PCoA1, y = PCoA2, color = date)) +
+  geom_point(size = 3, alpha = 0.3) +
+  labs(title = "PCoA of irep Values by Date", x = "PCoA1", y = "PCoA2") +
+  theme_minimal()
+```
+- The temporal gradient in the irep values suggests that date explains some variability. The mixed distribution of dates within the PCoA plot means that date is not the sole driver of the variability, and other factors (treatment, response category) need to be explored. Next, add date as a random effect to account for batch-like variability. 
+
+
+**Statistical models**
+```{r, echo=FALSE, warning=FALSE}
+model_m1 <- lmer(irep_unfiltered ~ response_category + treatment + (1 | mag), data = irep_results)
+model_m2 <- lmer(irep_unfiltered ~ response_category * treatment + date + (1 + treatment | mag), data = irep_results)
+model_m3 <- lmer(irep_unfiltered ~ response_category * treatment + date + (1 + treatment + date | mag), data = irep_results)
+anova(model_m1, model_m2, model_m3)
+```
+
+m1: Simplest model, focusing only on the effect of response_category while accounting for grouping by mag.
+m2: Introduce random slopes for treatment. This allows the effect of treatment on irep values to vary by mag. For example, treatment might have a stronger or weaker effect on irep values depending on the specific mag.
+m3: Add random slopes for both treatment and date -- the most complex model, assuming both treatment and date effects vary by mag. The random effect for treatment here means that the effect of mussel predation on control or treatment conditions vary across mags. The random slope for date allows for effect of date on irep values to vary across mags. 
+
+General idea here:
+- fixed effects are for variation across mags i.e. across all irep values in the df
+- random effects are for variation within mags, based on the ways the models are parameterized 
+
+First model one and 2 were run. Rationale for going to m3 from m2 is that residual variance is almost 54% (based on proportion) for m2 and treatment accounts for 10%. When we go to m3, the residual is only 10%, and date accounts for 38% and 29% (for 2 dates), suggesting that temporal dynamics/heterogeneity is important in driving the irep values withtin mags. 
+Note: make summary table for intecepts, what that represents, and p-values.
+
+```{r, echo=FALSE, warning=FALSE}
+# summarize
+summary(model_m1)
+summary(model_m2)
+summary(model_m3)
+```
+
+**Random effects summary for 3 models:**
+
+Model 1:
+mag      (Intercept) 0.3030   0.5505  
+Residual             0.4177   0.6463 
+
+Model 2:
+mag      (Intercept)     0.21855  0.4675       
+         treatmentquagga 0.07437  0.2727   
+Residual                 0.37943  0.6160
+
+Model 3: 
+mag      (Intercept)     0.2596   0.5095                    
+         treatmentquagga 0.1403   0.3746                
+         date8/13/19     0.5221   0.7226   
+         date9/18/19     0.6852   0.8278   
+Residual                 0.1782   0.4222 
+
+
+We can compute Intraclass Correlation Coefficient (ICC), which will give us the proportion of total variance explained by random effects.(Sum of Random Effects Variances/Total Variance): 
+- Model 1: Random effects (MAG = 0.303); residual = 0.418 i.e. 
+  Total proportion explained = (0.303) / (0.303+0.418) = 0.303/0.721 = 0.42 or ~42%   
+    
+- Model 2: Random effects (MAG = 0.219; treatment = 0.074); residual = 0.379 i.e. 
+  Total proportion explained = (0.219+0.074) / (0.219+0.074+0.379) = 0.293/0.672 = 0.44 or ~44% 
+  
+- Model 3: Random effects (MAG = 0.260; treatment = 0.140; dates = 0.522 + 0.685); residual = 0.178  i.e. 
+  Total proportion explained = (0.260+0.140+0.522+0.685) / (0.260+0.140+0.522+0.685+0.178) = 0.293/0.672 = 0.90 ~ 90%
+
+We can calculate the residual variance reduction of Model 3: 1 - residualVariance (model 3)/ residualVariance (model1 or 2)
+- Model 3 vs. Model 1: (1 - (0.1782/0.4177)) = 0.57; Thus, 57% reduction in variance in model 3 compared to model 1
+- Model 3 vs. Model 2: (1 - (0.1782/0.3794)) = 0.53; Thus, 52% reduction in variance in model 3 compared to model 2
+
+
+For models 2 and 3, test performance. Randomly split data into 80% training and 20% testing parts, and evaluate model performance using MSE and R2.
+```{r, echo=FALSE, warning=FALSE, warning=FALSE, message=FALSE}
+# set seed
+set.seed(505)
+
+# randomly split the data into 80% training and 20% testing
+train_indices <- sample(1:nrow(irep_results), size = 0.8 * nrow(irep_results))
+train_data <- irep_results[train_indices, ]
+test_data <- irep_results[-train_indices, ]
+
+# fit models on training data
+model_m2_train <- lmer(irep_unfiltered ~ response_category * treatment + date + (1 + treatment | mag), data = train_data)
+model_m3_train <- lmer(irep_unfiltered ~ response_category * treatment + date + (1 + treatment + date | mag), data = train_data)
+
+# predict on test data
+pred_m2 <- predict(model_m2_train, newdata = test_data, allow.new.levels = TRUE)
+pred_m3 <- predict(model_m3_train, newdata = test_data, allow.new.levels = TRUE)
+
+# evaluate models (MSE and R²)
+mse_m2 <- mean((test_data$irep_unfiltered - pred_m2)^2)
+mse_m3 <- mean((test_data$irep_unfiltered - pred_m3)^2)
+
+r2_m2 <- 1 - sum((test_data$irep_unfiltered - pred_m2)^2) / sum((test_data$irep_unfiltered - mean(test_data$irep_unfiltered))^2)
+r2_m3 <- 1 - sum((test_data$irep_unfiltered - pred_m3)^2) / sum((test_data$irep_unfiltered - mean(test_data$irep_unfiltered))^2)
+
+# print results
+cat("Model 2: MSE =", mse_m2, ", R² =", r2_m2, "\n")
+cat("Model 3: MSE =", mse_m3, ", R² =", r2_m3, "\n")
+```
+
+Repeat performance tests with different proportions of training and test data.
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+set.seed(505)
+
+# define training proportions 
+train_proportions <- seq(0.8, 0.4, by = -0.1)  # Decrease from 80% to 40% in 10% steps
+
+performance_results <- data.frame(Train_Proportion = numeric(), 
+                                  Model = character(), 
+                                  MSE = numeric(), 
+                                  R2 = numeric())
+
+# loop through each proportion
+for (p in train_proportions) {
+  
+  # sample training indices
+  train_indices <- sample(1:nrow(irep_results), size = p * nrow(irep_results))
+  train_data <- irep_results[train_indices, ]
+  test_data <- irep_results[-train_indices, ]
+
+  # fit models on training data
+  model_m2_train <- lmer(irep_unfiltered ~ response_category * treatment + date + (1 + treatment | mag), data = train_data)
+  model_m3_train <- lmer(irep_unfiltered ~ response_category * treatment + date + (1 + treatment + date | mag), data = train_data)
+
+  # predict on test data
+  pred_m2 <- predict(model_m2_train, newdata = test_data, allow.new.levels = TRUE)
+  pred_m3 <- predict(model_m3_train, newdata = test_data, allow.new.levels = TRUE)
+
+  # evaluate performance
+  mse_m2 <- mean((test_data$irep_unfiltered - pred_m2)^2)
+  mse_m3 <- mean((test_data$irep_unfiltered - pred_m3)^2)
+
+  r2_m2 <- 1 - sum((test_data$irep_unfiltered - pred_m2)^2) / sum((test_data$irep_unfiltered - mean(test_data$irep_unfiltered))^2)
+  r2_m3 <- 1 - sum((test_data$irep_unfiltered - pred_m3)^2) / sum((test_data$irep_unfiltered - mean(test_data$irep_unfiltered))^2)
+
+  performance_results <- rbind(performance_results, 
+                               data.frame(Train_Proportion = p, Model = "m2", MSE = mse_m2, R2 = r2_m2),
+                               data.frame(Train_Proportion = p, Model = "m3", MSE = mse_m3, R2 = r2_m3))
+}
+
+```
+
+```{r, echo=FALSE, warning=FALSE}
+print(performance_results)
+#write.csv(performance_results, "../R output/model_performance_results.csv")
+```
+
+Result report: To evaluate model robustness, we tested model 2 and model 3 on decreasing training data proportions (80% to 40%). Across all training sizes, model 3 consistently outperformed m2, with lower mean squared error (MSE: 0.237–0.307) and higher explained variance (R²: 0.61–0.69). In contrast, m2 exhibited greater variability, with higher MSE (0.387–0.582) and lower R² (0.36–0.44). These results indicate that m3 provides a more stable and generalizable representation of iRep values. (Supplemental Table1) 
+
+```{r, echo=FALSE, warning=FALSE}
+# rename the entries to capitalize and convert to factor
+irep_results <- irep_results %>% 
+  mutate(response_category = case_when(
+    response_category == "resistant" ~ "Resistant", 
+    response_category == "susceptible" ~ "Susceptible")) %>%
+  mutate(response_category = factor(response_category, levels = c("Resistant", "Susceptible")))
+```
+
+Figure 4A: Joy divison plot to visualize variance in irep values across mags.
+```{r, echo=FALSE, warning=FALSE}
+# define custom colors
+custom_colors <- c("Resistant" = "#B22222", "Susceptible" = "#808080")
+
+# create plot
+Figure_4A <- ggplot(filter(irep_results, treatment == "control"), aes(
+  x = irep_unfiltered, 
+  y = reorder(mag, irep_unfiltered, FUN = median), 
+  fill = response_category)) +
+  geom_density_ridges(scale = 2, alpha = 0.6, bandwidth = 0.3, color = NA) +
+  labs(title = "Instantaneous Growth Rates Across Populations",
+       x = "Index of Replication (irep) Estimates", 
+       y = "Populations") +
+  scale_fill_manual(values = custom_colors, name = "Population Category") + 
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 8),  
+    axis.text.x = element_text(size = 14),
+    axis.line = element_line(size = 0.8),
+    legend.position = "right",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(Figure_4A)
+#ggsave(filename = "../R output/Figures/Figure_4A_irepVariance.jpg", 
+#       plot = Figure_4A, 
+#       width = 9, height = 9, dpi = 300, units = "in")
+```
+
+Figure 4A:Visualize statistical findings of irep values.
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+means <- irep_results %>%
+  group_by(response_category, treatment) %>%
+  summarise(mean_irep = mean(irep_unfiltered), .groups = "drop") 
+
+custom_colors <- c("Resistant" = "#B22222", "Susceptible" = "#808080")
+
+# create Figure 4B
+Figure_4B <- ggplot(irep_results, aes(x = treatment, y = irep_unfiltered)) +
+  geom_violin(aes(fill = response_category), position = position_dodge(width = 0.8), alpha = 0.5, width = 0.8) + 
+  geom_line(data = means, aes(x = treatment, y = mean_irep, group = response_category, color = response_category), 
+            position = position_dodge(width = 0.8), size = 1, show.legend = FALSE) +
+  geom_point(data = means, aes(x = treatment, y = mean_irep, color = response_category), 
+             position = position_dodge(width = 0.8), size = 5, shape = 21, fill = "white", stroke = 1.5, show.legend = FALSE) + 
+  coord_cartesian(ylim = c(1, 7)) +
+  scale_fill_manual(values = custom_colors, name = "Population Category") +
+  scale_color_manual(values = custom_colors, labels = c("Resistant Mean", "Susceptible Mean")) +
+  guides(color = guide_legend(override.aes = list(shape = 21, size = 5, fill = "white", stroke = 1.5, linetype = "solid"))) +
+  labs(title = "Instantaneous Growth Rates Across Treatments", 
+       x = "Treatment", y = "Index of Replication (irep) Estimates") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+        axis.title = element_text(size = 18, face = "bold"),
+        axis.text.y = element_text(size = 10),  
+        axis.text.x = element_text(size = 14),
+        axis.line = element_line(size = 0.8),
+        legend.position = "right",
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14, face = "bold"),
+        strip.text = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()
+        )
+
+
+print(Figure_4B)
+#ggsave(filename = "../R output/Figures/Figure_4B_irepResults.jpg", 
+#       plot = Figure_4B, 
+#       width = 12, height = 9, dpi = 300, units = "in")
+```
+

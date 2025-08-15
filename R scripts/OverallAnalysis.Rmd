@@ -1,0 +1,636 @@
+---
+title: "LEfeeding_metaG_analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Load packages
+```{r, message=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(stats)
+library(purrr)
+library(MASS)
+library(rstatix)
+library(ggtext)
+library(car)
+library(boot)
+library(lme4)
+```
+
+
+Load metadata, q2q3 summary, and bin summary files.
+```{r, message=FALSE, warning=FALSE}
+metadata <- as.data.frame(read_csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/other output/metadata.csv"))
+Q2Q3cov <- as.data.frame(read_table("~/Documents/UMich/papers/GrowthDefenseTradeOff/anvio files/MY_SUMMARY/bins_across_samples/mean_coverage_Q2Q3.txt")) # contains the q2q3 coverage info 
+bins_summary <- as.data.frame(read_table("~/Documents/UMich/papers/GrowthDefenseTradeOff/anvio files/MY_SUMMARY/bins_summary.txt")) # contains total_length, GC, completion, taxonomy etc. info
+```
+
+
+
+We will use sequence counts (read depth) for normalization so that we get a relative abundance proxy for across samples comparison.
+```{r, message=FALSE, warning=FALSE}
+seqcounts <- read_csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/QC/seqcounts.csv")
+seqcounts <- head(seqcounts, 29) # remove rows with NA
+mean(seqcounts$MSeqs)
+min(seqcounts$MSeqs)
+max(seqcounts$MSeqs)
+```
+
+
+Use minimum seq counts (here, 103.4) to get a ratio for each sample. Then multiply each sample's read (q2q3) by its respective ratio. 
+```{r}
+# calculate ratio
+seqcounts$normalized_ratio <- seqcounts$MSeqs / 103.4
+
+# convert Q2Q3 into compatible format
+transposed_Q2Q3cov <- as.data.frame(t(Q2Q3cov)) # transpose Q2Q3coverage dataframe
+colnames(transposed_Q2Q3cov) <- transposed_Q2Q3cov[1, ] # change column names to bin names
+transposed_Q2Q3cov <- transposed_Q2Q3cov[-1, ] # remove the extra first row
+transposed_Q2Q3cov$sample <- rownames(transposed_Q2Q3cov) # add a new sample column & revert rownames to numbers 
+rownames(transposed_Q2Q3cov) <- NULL
+
+transposed_Q2Q3cov <- transposed_Q2Q3cov %>% # bring the sample column to be the first column in the df
+  dplyr::select(sample, everything())
+
+norm_Q2Q3cov <- inner_join(transposed_Q2Q3cov, seqcounts, by = "sample") # create a new df to store normalized values. 
+
+norm_Q2Q3cov <- norm_Q2Q3cov %>% 
+  dplyr::select(sample, normalized_ratio, contains("MAG")) # bring sample and normalized_ratio cols to the beginning and exclude total col
+
+# calculate new values 
+num_cols <- names(norm_Q2Q3cov)[3:ncol(norm_Q2Q3cov)] # exclude  'sample' and 'normalized_ratio' cols
+norm_Q2Q3cov[num_cols] <- lapply(norm_Q2Q3cov[num_cols], as.numeric)
+norm_Q2Q3cov[num_cols] <- norm_Q2Q3cov[num_cols] * norm_Q2Q3cov$normalized_ratio
+```
+
+
+Combine normalized coverage with the metadata and save the new df.
+```{r}
+meta_covq2q3 <- inner_join(metadata, norm_Q2Q3cov, by = "sample")
+write.csv(meta_covq2q3, "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/meta_covq2q3.csv")
+```
+
+```{r, include=FALSE}
+# for this project, limit analysis to 3 LE dates since overall mussel feeding was NOT significant on the July 31 date
+sub_covq2q3 <- meta_covq2q3 %>% 
+  filter (date != "7/31/19")
+```
+
+
+Filter out low coverage samples (using detection data) to reduce noise. Detection values represent the proportion of a given contig that is covered at least 1X. So, the detection value of a bin is the average detection value of all the contigs that it contains.  
+```{r, warning=FALSE, message=FALSE}
+detection <- read_delim("~/Documents/UMich/papers/GrowthDefenseTradeOff/anvio files/MY_SUMMARY/bins_across_samples/detection.txt", 
+    delim = "\t", escape_double = FALSE, 
+    trim_ws = TRUE)
+```
+
+
+Look at distribution of detection values across samples.
+```{r, warning=FALSE, message=FALSE, include=FALSE}
+# extract only numeric columns
+numeric_data <- detection[sapply(detection, is.numeric)]
+
+# loop through each numeric column and create a histogram
+for(column in colnames(numeric_data)) {
+    hist(numeric_data[[column]], main = paste("Histogram of", column), xlab = column, col = "skyblue", border = "black")
+}
+```
+
+
+Plot all the detection values together
+```{r}
+# extract only numeric columns
+numeric_data <- detection[sapply(detection, is.numeric)]
+
+# combine all numeric columns into a single vector
+all_values <- unlist(numeric_data)
+
+# create a histogram for the combined values
+hist(all_values, main = "Histogram of All Numeric Entries", xlab = "Values", col = "skyblue", border = "black")
+```
+
+
+Next, plot detection vs coverage - X axis as coverage and Y axis as detection. As coverage goes up, detection should go up but detection should saturate. Based on this relationship, we can figure out where to set the cutoff threshold for detection.
+```{r, warning=FALSE, message=FALSE}
+# identify common columns that are numeric in both dataframes
+common_columns <- intersect(names(Q2Q3cov), names(detection))
+common_numeric_columns <- Filter(function(col) {
+    is.numeric(Q2Q3cov[[col]]) && is.numeric(detection[[col]])
+}, common_columns)
+
+# open a new PDF file to save the plots
+pdf("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/Figures/DetectionVsCov.pdf")
+
+# loop through each common numeric column and create a scatter plot
+for (column in common_numeric_columns) {
+    plot_df <- data.frame(Q2Q3cov_Value = Q2Q3cov[[column]], Detection_Value = detection[[column]])
+    p <- ggplot(plot_df, aes(x = Q2Q3cov_Value, y = Detection_Value)) +
+        geom_point() +
+        labs(title = paste("Scatter Plot for", column), x = paste("Q2Q3cov", column), y = paste("Detection", column)) +
+        theme_minimal()
+    print(p)
+}
+
+# close the PDF file
+dev.off()
+```
+
+We will select 0.70 (70%) as the detection cutoff, as the relationship seems to scatter around here. 70% will also allow for strain variation while controlling for noise. We need to filter out low detection bins. Our goal is to evaluate the detection values for each bin within control samples for each date. If the mean detection value of a bin across control samples on a particular date is 70% or more, we will retain the coverage values for both control and quagga treatments for that bin on that date in the sub_covq2q3 dataframe. If the mean detection is less than 70%, we will set the coverage values to NA for that bin for both treatments on that date.
+
+```{r, warning=FALSE, message=FALSE}
+# transform detection into percentage.
+copied_detection <- detection %>% 
+  mutate(across(-1, ~ . * 100)) 
+
+#%>% mutate(across(-1, ~ ifelse(. < 70, NA, .)))
+# transpose detection data
+transposed_detection <- t(copied_detection[-1]) # remove first col 
+transposed_detection <- as.data.frame(transposed_detection) # convert into df
+colnames(transposed_detection) <- copied_detection[[1]] 
+transposed_detection$sample <- rownames(transposed_detection) 
+transposed_detection <- transposed_detection[, c("sample", setdiff(names(transposed_detection), "sample"))] # move sample col to 1st position
+
+# extract relevant metadata
+sub_covq2q3_relevant <- sub_covq2q3 %>% dplyr::select(sample, date, treatment)
+
+# filter control samples 
+control_samples <- transposed_detection %>% 
+                    inner_join(sub_covq2q3_relevant, by = "sample") %>% 
+                    filter(treatment == "control")
+
+# calculate mean detection for control samples
+mean_detection <- control_samples %>%
+                    group_by(date) %>%
+                    dplyr::summarise(across(starts_with("ND"), mean, na.rm = TRUE))
+
+# create a boolean matrix
+boolean_detection <- transposed_detection
+
+# adjust the col names
+colnames(mean_detection)[-1] <- paste0(colnames(mean_detection)[-1], "_mean")
+
+# apply the boolean condition; set value to TRUE (if the mean detection is not NA and ≥ 70 for the date) and FALSE (if otherwise).
+for (i in 1:nrow(boolean_detection)) {
+  sample <- boolean_detection$sample[i]
+  sample_date <- sub_covq2q3_relevant$date[sub_covq2q3_relevant$sample == sample]
+
+  if (length(sample_date) > 0) {
+    for (bin in names(boolean_detection)[-1]) { # excluding the 'sample' column
+      mean_det <- mean_detection %>% 
+                  filter(date == sample_date) %>%
+                  pull(paste0(bin, "_mean"))
+
+      boolean_detection[i, bin] <- !is.na(mean_det) && mean_det >= 70
+    }
+  }
+}
+
+# keep matching samples
+matched_samples <- sub_covq2q3_relevant$sample
+boolean_detection <- boolean_detection[boolean_detection$sample %in% matched_samples, ]
+
+# filter coverage data
+sub_covq2q3_coverage <- sub_covq2q3 %>% dplyr::select(-sample, -date, -treatment, -experiment, -normalized_ratio)
+filtered_covinfo <- sub_covq2q3_coverage
+
+# apply boolean
+for (i in 1:nrow(filtered_covinfo)) {
+  sample <- sub_covq2q3_relevant$sample[i]
+  for (bin in names(filtered_covinfo)) {
+    # Only apply filter if the sample exists in boolean_detection
+    if (sample %in% boolean_detection$sample) {
+      keep_value <- boolean_detection[boolean_detection$sample == sample, bin]
+      if (!is.na(keep_value) && keep_value == 0) {
+        filtered_covinfo[i, bin] <- NA
+      }
+    }
+  }
+}
+
+# combine the updated coverage data and metadata
+filtered_covinfo <- cbind(sub_covq2q3_relevant, filtered_covinfo)
+```
+
+
+The filtered_covinfo df contains the relevant q2q3 coverage values (normalized) for bins we want to include.
+```{r}
+write.csv(filtered_covinfo, "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/filtered_covinfo.csv")
+```
+
+
+Run GLM for each bin to test if statistical differences in the mean relative coverage between control and quagga treatments. We will use negative binomial family because of overdispersion in the data (tested earlier with Poisson and quasi-Poisson). 
+```{r, message=FALSE, warning=FALSE}
+# Function for GLM
+perform_glm_nb <- function(dataframe, filter_day) {
+  # Filter data for the specified day
+  filtered_data <- dplyr::filter(dataframe, date == filter_day)
+  
+  # Prepare the result dataframe
+  result_df <- data.frame(bin = character(), control_mean = numeric(), 
+                          quagga_mean = numeric(), p_value = numeric(), 
+                          sig = character(), stringsAsFactors = FALSE)
+
+  # Get the list of "ND" column names
+  nd_column_names <- grep("^ND", names(filtered_data), value = TRUE)
+
+  for (nd_column in nd_column_names) {
+    # Prepare data for GLM
+    glm_data <- na.omit(filtered_data[, c('treatment', nd_column)])
+    if (nrow(glm_data) > 1) {
+      # Extracting and rounding means to four decimal places
+      control_mean <- round(mean(glm_data[glm_data$treatment == 'control', nd_column], na.rm = TRUE), 4)
+      quagga_mean <- round(mean(glm_data[glm_data$treatment == 'quagga', nd_column], na.rm = TRUE), 4)
+
+      # Running Negative Binomial GLM
+      glm_nb <- MASS::glm.nb(formula = as.formula(paste(nd_column, "~ treatment")), data = glm_data)
+      
+      # Extracting p-value
+      p_value <- summary(glm_nb)$coefficients['treatmentquagga', 'Pr(>|z|)']
+
+      # Adding to the result dataframe
+      result_df <- rbind(result_df, data.frame(bin = nd_column, 
+                                               control_mean = control_mean, 
+                                               quagga_mean = quagga_mean, 
+                                               p_value = p_value, 
+                                               sig = ifelse(p_value < 0.05, "yes", "no"),
+                                               direction = ifelse(control_mean > quagga_mean, "decrease", "increase"),
+                                               date = filter_day))
+    }
+  }
+
+  return(result_df)
+}
+```
+
+
+Run GLM for the 3 experimental dates
+```{r, warning=FALSE, message=F}
+result_719 <- perform_glm_nb(filtered_covinfo, "7/19/19")
+result_813 <- perform_glm_nb(filtered_covinfo, "8/13/19")
+result_918 <- perform_glm_nb(filtered_covinfo, "9/18/19")
+```
+
+Add a sig_group column for grouping bins that significantly decreased in abundance (susceptible), bins that did not change significantly (includes feeding like avg bacteria), and bins that significantly increased (resistant)
+```{r, warning=FALSE, message=F}
+result_719$sig_group <- with(result_719, ifelse(sig == "yes" & direction == "decrease", "sig_decrease", "other"))
+result_813$sig_group <- with(result_813, ifelse(sig == "yes" & direction == "decrease", "sig_decrease", "other"))
+result_918$sig_group <- with(result_918, ifelse(sig == "yes" & direction == "decrease", "sig_decrease", "other"))
+
+# combine result dfs
+
+combined_result <- rbind(result_719, result_813, result_918)
+
+# combine with bins_summary df to add other details
+colnames(bins_summary)[1] <- "bin"
+bins_extendedinfo <- inner_join(bins_summary, combined_result)
+```
+
+Now the bins_extendedinfo df contains taxonomic information, control and quagga mean coverage values (scaled), statistical results comparing the means, and some other metadata information. 
+```{r, warning=FALSE, message=F, include=FALSE}
+# save df
+write.csv(bins_extendedinfo, "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/bins_extendedinfo.csv")
+```
+
+Generate a summary dfs categorizing MAGs by presence (present in all dates, present in 2 dates, and present once).
+```{r}
+# categorize MAGs by presence
+mags_presence_count <- bins_extendedinfo %>%
+  group_by(bin) %>%
+  summarize(presence_count = n_distinct(date)) %>%
+  mutate(presence_category = case_when(
+    presence_count == 3 ~ 'Present in all 3 dates',
+    presence_count == 2 ~ 'Present in 2 dates',
+    presence_count == 1 ~ 'Present only once',
+    TRUE ~ 'Unknown'
+  ))
+
+# determine the consistency of direction for each MAG
+mags_direction_consistency <- bins_extendedinfo %>%
+  group_by(bin) %>%
+  dplyr::summarize(mags_direction_consistency = ifelse(n_distinct(direction) == 1, 'Consistent', 'Variable'))
+
+# merge presence categories and direction consistency
+mags_summary_table <- mags_presence_count %>%
+  left_join(mags_direction_consistency, by = 'bin')
+
+total_mags_presence_summary <- mags_summary_table %>%
+  group_by(presence_category) %>%
+  dplyr::summarize(
+    n = n(),
+    consistent = sum(mags_direction_consistency == 'Consistent'),
+    variable = sum(mags_direction_consistency == 'Variable')
+  )
+
+# save dfs
+write.csv(mags_summary_table, "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/mags_summary_table.csv")
+write.csv(total_mags_presence_summary, "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/total_mags_presence_summary.csv")
+```
+
+
+Check if MAG persistence (frequency of presence - 1 time, 2 times, or 3 times) is correlated with resistance.
+Start by running anova to see if mean log2(q:c) ratios are different between mags in these 3 groups.
+```{r, warning=FALSE, message=FALSE}
+# merge the dataframes
+persistence_df <- merge(mags_summary_table, bins_extendedinfo, by = "bin")
+
+# calculate the log2 ratio
+persistence_df <- persistence_df %>%
+  mutate(log2_ratio = log2(as.numeric(quagga_mean) / as.numeric(control_mean)))
+
+# ANOVA
+persistance_anova_result <- aov(log2_ratio ~ presence_category, data = persistence_df)
+summary(persistance_anova_result)
+
+# set the order of categories explicitly
+persistence_df$presence_category <- factor(persistence_df$presence_category,
+                                            levels = c("Present in all 3 dates", "Present in 2 dates", "Present only once"))
+```
+
+Based on this the ANOVA test, there is no significant differences in the mean log2 ratios across the three persistence categories (F-statistic: 0.603, p value: 0.548). However, ANOVA assumes equal variance between groups. Therefore, run a Levene's test to measure the equality of variance in the data between these groups. The null hypothesis for Levene's test is that population variances are equal. If the p-value for Levene's test is less than 0.05, it means that there is a difference between the variances in the population and the observed variance is unlikely to be explained based on random sampling. 
+
+
+```{r}
+# Levene's Test
+levene_test <- leveneTest(log2_ratio ~ presence_category, data = persistence_df)
+levene_test
+```
+Statistic: 5.140; p-value: 0.006
+The p-value of 0.006 indicates that the variances of log2ratios are significantly different across the persistence categories. This suggests that ANOVA results may be unreliable. So, transform the data for chi-sq test, and compare the proportion of MAGs that are resistant in each category. For MAGs that appear more than once, take the average log2 ratio to assign them a resistant of persistent category. 
+```{r, message=FALSE, warning=FALSE}
+# calculate the mean log2 ratio for each MAG
+mean_log2_ratio <- persistence_df %>%
+  group_by(bin) %>%
+  summarise(mean_log2_ratio = mean(log2_ratio))
+
+# classify each MAG based on mean log2 ratio
+mean_log2_ratio <- mean_log2_ratio %>%
+  mutate(resistant = ifelse(mean_log2_ratio > 0, 1, 0))
+
+# determine the presence category for each unique MAG
+presence_category <- persistence_df %>%
+  group_by(bin) %>%
+  summarise(presence_category = first(presence_category))
+
+# combine the classification with the presence category
+merged_chisq <- merge(mean_log2_ratio, presence_category, by = "bin")
+
+# create a contingency table
+contingency_table <- table(merged_chisq$presence_category, merged_chisq$resistant)
+contingency_table
+
+
+# perform Chi-Square Test
+chi_sq_test <- chisq.test(contingency_table)
+chi_sq_test
+
+# prepare data for plotting
+chisq_proportion_data <- merged_chisq %>%
+  group_by(presence_category) %>%
+  summarise(total_count = n(),
+            resistant_count = sum(resistant),
+            proportion_resistant = resistant_count / total_count)
+
+# set the order of categories explicitly
+chisq_proportion_data$presence_category <- factor(chisq_proportion_data$presence_category,
+                                            levels = c("Present in all 3 dates", "Present in 2 dates", "Present only once"))
+```
+The p-value of 0.04 here suggests that there is a significant difference between proportions of MAGs that are resistant between the persistance groups. Plot total number of MAGs and chi-sq proportions in a single plot (paper figure 5).
+```{r, message=FALSE, warning=FALSE}
+Fig5 <- ggplot(chisq_proportion_data, aes(x = presence_category, y = total_count)) +
+  geom_bar(stat = "identity", fill = "#02401B", alpha = 0.6, width = 0.7) +
+  geom_line(aes(y = proportion_resistant * max(total_count), group = 1), color = "#B22222") +
+  geom_point(aes(y = proportion_resistant * max(total_count)), color = "#B22222") +
+  scale_y_continuous(sec.axis = sec_axis(~./max(chisq_proportion_data$total_count), name = "Proportion of Resistant Populations", labels = scales::percent)) +
+  labs(x = "Persistence Category", y = "Total Number of Populations Present") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 22),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.title.y.left = element_text(color = "#02401B"),
+    axis.title.y.right = element_text(color = "#B22222"),
+    axis.line = element_line(size = 0.8),
+    axis.text.y = element_text(size = 14),  
+    axis.text.x = element_text(size = 14),
+    legend.position = "right",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 16, face = "bold"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+    )
+Fig5
+# plot
+ggsave(filename = "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/Figures/Figure_5_persistence.jpg", 
+       plot = Fig5, 
+       width = 12, height = 9, dpi = 300, units = "in")
+```
+
+
+Next, check if rel. abundance (relative in this case) correlates with resistance. In other words, if abundant taxa are resistant. We will do bootstrapping to account for difference in sample size. 
+```{r}
+# add resistance status col
+cov_analysis <- bins_extendedinfo %>%
+  mutate(resistance_status = ifelse(direction == "increase", "resistant", "susceptible"))
+
+# extract control means 
+resistant_control_means <- cov_analysis %>% filter(resistance_status == "resistant") %>% pull(control_mean)
+susceptible_control_means <- cov_analysis %>% filter(resistance_status == "susceptible") %>% pull(control_mean)
+
+# make control means  numeric
+resistant_control_means <- as.numeric(resistant_control_means)
+susceptible_control_means <- as.numeric(susceptible_control_means)
+
+# define bootstrap function for mean diff
+mean_diff <- function(data, indices) {
+  resistant_sample <- sample(data$resistant, length(data$resistant), replace = TRUE)
+  susceptible_sample <- sample(data$susceptible, length(data$susceptible), replace = TRUE)
+  return(mean(resistant_sample) - mean(susceptible_sample))
+}
+
+# combine control means into a single list
+boot_data <- list(resistant = resistant_control_means, susceptible = susceptible_control_means)
+
+# perform bootstrap resampling
+set.seed(123) # seed for reproducibility
+boot_results <- boot(data = boot_data, statistic = mean_diff, R = 10000)
+
+# calculate 95% confidence interval
+ci <- boot.ci(boot_results, type = "perc")
+
+# print results
+observed_mean_diff <- mean(resistant_control_means) - mean(susceptible_control_means)
+print(observed_mean_diff)
+print(ci)
+```
+Observed Mean Difference: -5.87 (resistant MAGs have, on average, lower control coverage than susceptible MAGs); 95% Confidence Interval: [-12.14, 1.08]. The confidence interval includes 0, indicating that the difference is not statistically significant at the 95% confidence level. This suggests that abundance does not correlate with resistance to feeding. 
+
+
+Run Levene's test to compare if the variances are different
+```{r}
+# combine into a single data frame
+control_means <- data.frame(
+  value = c(resistant_control_means, susceptible_control_means),
+  group = c(rep("resistant", length(resistant_control_means)), rep("susceptible", length(susceptible_control_means)))
+)
+
+# perform Levene's test for equal variances
+levene_test <- leveneTest(value ~ group, data = control_means)
+# print results
+print(levene_test)
+```
+The p-value of 0.163 suggests that there is no statistically significant difference in the variances between the control means of the resistant and susceptible groups. At alpha level of 0.05, we fail to reject the null hypothesis for the Levene's test. This further reinforces the idea that lack of relationship between abundance and resistance is real and not noise.  
+
+
+Test if GC percentage is different between are resistant and susceptible MAGs. Run Wilcoxon test
+```{r}
+# create list and get dates
+GC_test_results_list <- list()
+unique_dates <- unique(bins_extendedinfo$date)
+
+# loop through each date
+for (date in unique_dates) {
+  subset_data <- bins_extendedinfo[bins_extendedinfo$date == date, ] # subset for current date
+  test_result <- wilcox.test(GC_content ~ sig_group, data = subset_data) # perform Wilcoxon rank-sum test
+  GC_test_results_list[[date]] <- test_result   # store the test result in the list
+}
+# print 
+GC_test_results_list
+```
+For all 3 dates, we see that the mean difference in GC percentage between resistant and susceptible MAGs is not statistically significant. 
+
+Next, check if the mean genome length varies between resistant and susceptible MAGs
+```{r}
+# repeat GC code but now for genome length
+len_test_results_list <- list()
+unique_dates <- unique(bins_extendedinfo$date)
+for (date in unique_dates) {
+  subset_data <- bins_extendedinfo[bins_extendedinfo$date == date, ]
+  test_result <- wilcox.test(total_length ~ sig_group, data = subset_data)
+  len_test_results_list[[date]] <- test_result
+}
+# print results
+len_test_results_list
+```
+We see that the total genome length also does NOT differ statistically between the two groups.
+
+Instead of comapring the means between two categories of MAGs, let's try plotting GC and genome length as continuous variable using linear model.
+```{r}
+# calculate Q:C mean ratio
+cov_continuous <- bins_extendedinfo %>% 
+  dplyr::select(bin, GC_content, total_length, control_mean, quagga_mean, date) %>% 
+  dplyr::mutate(ratio = log2(quagga_mean/control_mean))
+
+# GC plot
+gc_plot <- ggplot(cov_continuous, aes(x = ratio, y = GC_content)) +
+  geom_point(alpha=0.8, size = 3)+
+  #stat_cor(method = "spearman", label.x.npc = 0.75, label.y.npc = 0.9, p.accuracy = 0.001, r.accuracy = 0.01)+
+	labs(x= expression(log[2]("Quagga Mean / Control Mean")),
+		y="GC content (in %)") +
+  theme(plot.title = element_text(hjust = 0.5, size = 15, face="bold"),
+	      axis.title = element_text(size=14),
+	      axis.text = element_text(size=11),
+	      axis.text.x = element_text(vjust = -2),
+	      axis.title.x = element_text(vjust=-1),
+        legend.position = c(0.93, 0.65),
+        legend.title = element_text(size = 9),
+	      strip.background = element_blank(),
+	      panel.background = element_rect(fill = "white"),
+	      axis.line = element_line(colour = "black")
+	      )
+gc_plot
+
+# model
+gc_model <- lm(ratio ~ GC_content, data = cov_continuous)
+
+# print
+summary(gc_model)
+
+# save
+ggsave("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/Figures/gc_plot.png", plot = gc_plot, bg = "white")
+```
+
+```{r}
+length_plot <- ggplot(cov_continuous, aes(x = ratio, y = total_length)) +
+  geom_point(alpha=0.8, size = 3)+
+  #stat_cor(method = "spearman", label.x.npc = 0.75, label.y.npc = 0.9, p.accuracy = 0.001, r.accuracy = 0.01)+
+	labs(x= expression(log[2]("Quagga Mean / Control Mean")),
+		y="Total Length") +
+  theme(plot.title = element_text(hjust = 0.5, size = 15, face="bold"),
+	      axis.title = element_text(size=14),
+	      axis.text = element_text(size=11),
+	      axis.text.x = element_text(vjust = -2),
+	      axis.title.x = element_text(vjust=-1),
+        legend.position = c(0.93, 0.65),
+        legend.title = element_text(size = 9),
+	      strip.background = element_blank(),
+	      panel.background = element_rect(fill = "white"),
+	      axis.line = element_line(colour = "black")
+	      )
+length_plot
+length_model <- lm(ratio ~ total_length, data = cov_continuous)
+summary(length_model)
+ggsave("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/Figures/length_plot.png", plot = length_plot, bg = "white")
+```
+Both GC content and total length do not predict feeding, as p-values for the regressions are above 0.05. 
+Save dfs for MAGs that shifted significantly for anvio enrichment analysis (KEGG, pfam, and COG).
+```{r}
+# subset bins where sig is "yes"
+sig_yes_data <- filter(bins_extendedinfo, sig == "yes")
+
+# function to categorize direction
+categorize_direction <- function(directions) {
+  if (all(directions == "increase")) {
+    return("resistant")
+  } else if (all(directions == "decrease")) {
+    return("susceptible")
+  } else {
+    return("mixed")
+  }
+}
+
+# group by bin and categorize direction
+sig_bins <- sig_yes_data %>%
+  group_by(bin) %>%
+  summarise(direction = categorize_direction(direction)) 
+
+# rename columns
+sig_bins <- rename(sig_bins, bin_name = bin, group = direction)
+```
+
+There are 151 unique MAGs that shifted significantly during atleast one experiment. This is out of 181 unique MAGs that we have total in the bins_extendedinfo df from 3 experimental dates (excluding July 31). Out of the 151 unique MAGs, 2 MAGs (ND57_MAG_00025, and ND57_MAG_00038) are in the mixed category (i.e. significantly variable response). Both MAGs belong to the Actinobacteriota phylum. 134 MAGs were consistently susceptible (i.e. decreased in the quagga treatment when present) and 15 MAGs were consistently resistant (increased significantly when present). 
+
+Save df with only resistant and susceptible MAGs for anvio analysis
+```{r}
+filtered_MAGs_sig <- sig_bins %>% 
+  dplyr::filter(group == "resistant" | group == "susceptible")
+write.table(filtered_MAGs_sig, file = "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/sig_bins.tsv", sep = "\t", row.names = FALSE)
+```
+
+
+Make a list of bins for each date and save dfs
+```{r}
+july19_bins <- bins_extendedinfo %>% 
+  dplyr::filter(date == "7/19/19", control_mean > 0) %>% 
+  dplyr::select(bin, sig_group) %>% 
+  dplyr::rename(bin_name = bin, group = sig_group)
+write.table(july19_bins, file = "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/july19_bins.tsv", sep = "\t", row.names = FALSE)
+
+
+aug13_bins <- bins_extendedinfo %>% 
+  dplyr::filter(date == "8/13/19", control_mean > 0) %>% 
+  dplyr::select(bin, sig_group) %>% 
+  dplyr::rename(bin_name = bin, group = sig_group)
+write.table(aug13_bins, file = "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/aug13_bins.tsv", sep = "\t", row.names = FALSE)
+  
+
+sep18_bins <- bins_extendedinfo %>% 
+  dplyr::filter(date == "9/18/19", control_mean > 0) %>% 
+  dplyr::select(bin, sig_group) %>% 
+  rename(bin_name = bin, group = sig_group)
+write.table(sep18_bins, file = "~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/sep18_bins.tsv", sep = "\t", row.names = FALSE)
+```

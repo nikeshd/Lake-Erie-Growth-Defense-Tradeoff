@@ -1,0 +1,512 @@
+---
+title: "pfam"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries
+```{r, warning=F, message=F}
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(vegan)
+library(randomForest)
+library(reshape2)
+library(rstatix)
+library(vegan)
+```
+
+
+Load file containing pfam info and metadata.
+```{r, warning=FALSE, message=FALSE}
+pfam <- read.delim("~/Documents/UMich/papers/GrowthDefenseTradeOff/pfam/function.txt")
+bins_extendedinfo <- read.csv("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/bins_extendedinfo.csv")
+```
+
+Filter out pfam, read gene calls, and combine contig info with pfam info.
+```{r, warning=FALSE, message=FALSE}
+filtered_pfam <- pfam %>% 
+  dplyr::filter(source == "Pfam")
+
+gene.calls.txt <- read.delim("~/Documents/UMich/papers/GrowthDefenseTradeOff/other output/gene-calls-txt")
+
+tmp <- gene.calls.txt %>% 
+  dplyr::select(gene_callers_id, contig)
+
+pfam_summary <- inner_join(filtered_pfam, tmp, by = "gene_callers_id")
+```
+
+Add bin column and filter only manually curated MAGs.
+```{r, warning=FALSE, message=FALSE}
+# extract bin info
+pfam_summary <- pfam_summary %>% mutate(bin = str_extract(contig, "^[^-]+"))
+
+pfam_MAGs <- pfam_summary %>% 
+  dplyr::filter(str_detect(bin, "_MAG_"))
+```
+
+Load df with list of MAGs whose mean rel abundance shifted significantly between treatments.
+```{r, warning=FALSE, message=FALSE}
+sig_bins <- read.delim("~/Documents/UMich/papers/GrowthDefenseTradeOff/R output/sig_bins.tsv")
+
+
+# merge the pfam df with bin category information
+sig_bins <- sig_bins %>% # rename bin column
+  rename_at("bin_name", ~'bin')
+
+merged_pfam <- inner_join(pfam_MAGs, sig_bins, by = "bin")
+```
+
+Next, calculate relative proportion of pfams.
+```{r, warning=FALSE, message=FALSE}
+# calculate total Pfams per bin
+total_pfams_per_bin <- merged_pfam %>%
+  group_by(bin) %>%
+  summarise(total_pfams = n())
+
+# calculate count of each Pfam per bin
+pfam_counts_per_bin <- merged_pfam %>%
+  group_by(bin, accession) %>%
+  summarise(count = n(), .groups = 'drop')
+
+# calculate proportions
+pfam_proportions <- merge(pfam_counts_per_bin, total_pfams_per_bin, by = "bin") %>%
+  mutate(proportion = count / total_pfams)
+
+# add group info to the proportions data
+pfam_proportions_with_group <- merge(pfam_proportions, merged_pfam %>% dplyr::select(bin, group) %>% distinct(), by = "bin")
+
+# save
+#write.csv(pfam_proportions_with_group, "../R output/pfam_proportions_with_group.csv")
+```
+
+Split into resistant and suceptible categories
+```{r, warning=FALSE, message=FALSE} 
+# split data by group for comparison
+increase_data <- subset(pfam_proportions_with_group, group == "resistant")
+decrease_data <- subset(pfam_proportions_with_group, group == "susceptible")
+
+# identify Pfam categories exclusive to each group and those present in both
+pfam_group_presence <- pfam_proportions_with_group %>%
+  group_by(accession) %>%
+  summarize(groups_present = list(unique(group))) %>%
+  ungroup()
+
+pfam_group_presence$exclusive_to_increase <- sapply(pfam_group_presence$groups_present, function(x) "resistant" %in% x & !("susceptible" %in% x))
+pfam_group_presence$exclusive_to_decrease <- sapply(pfam_group_presence$groups_present, function(x) "susceptible" %in% x & !("resistant" %in% x))
+pfam_group_presence$in_both_groups <- sapply(pfam_group_presence$groups_present, function(x) "resistant" %in% x & "susceptible" %in% x)
+
+# extract lists of Pfam categories
+exclusive_to_increase <- pfam_group_presence$accession[pfam_group_presence$exclusive_to_increase]
+exclusive_to_decrease <- pfam_group_presence$accession[pfam_group_presence$exclusive_to_decrease]
+pfams_in_both_groups <- pfam_group_presence$accession[pfam_group_presence$in_both_groups]
+
+# save resistant only pfam
+#write.csv(pfam_proportions_with_group, "../R output/pfams_resistantonly.csv")
+# save pfams_in_both_groups
+#write.csv(pfams_in_both_groups, "../R output/pfams_in_both_groups.csv")
+```
+
+Perform Wilcoxon tests on relative proportions for Pfams in both groups
+```{r, warning=FALSE, message=FALSE}
+# filter the data to include only those Pfam categories found in both groups
+filtered_proportions_for_tests <- pfam_proportions_with_group %>%
+  filter(accession %in% pfams_in_both_groups)
+
+# test for each Pfam category
+test_results <- filtered_proportions_for_tests %>%
+  group_by(accession) %>%
+  wilcox_test(proportion ~ group) %>%
+  ungroup() %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance() %>%
+  filter(p.adj < 0.05)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# Merge test_results with functional descriptions
+significant_pfams_with_desc <- merge(test_results, merged_pfam %>% select(accession, function.) %>% distinct(), by = "accession")
+
+# Let's join this with the original proportions data to get the mean proportions for "increase" and "decrease" groups
+significant_proportions <- merge(pfam_proportions_with_group, significant_pfams_with_desc, by = "accession")
+
+# calculate mean proportions for these significant Pfams in each group
+mean_proportions_significant <- significant_proportions %>%
+  group_by(accession, function., group) %>%
+  summarise(mean_proportion = mean(proportion), .groups = 'drop')
+
+# rename using caps for plot
+mean_proportions_significant$group[mean_proportions_significant$group == "resistant"] <- "Resistant"
+mean_proportions_significant$group[mean_proportions_significant$group == "susceptible"] <- "Susceptible"
+
+# save df with mean proportions of enriched Pfams
+#write.csv(mean_proportions_significant, "../R output/enriched_pfams.csv")
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# replace labels for the all shared pfams (4226 unique pfams) and save 
+filtered_proportions_for_tests$group[filtered_proportions_for_tests$group == "resistant"] <- "Resistant"
+filtered_proportions_for_tests$group[filtered_proportions_for_tests$group == "susceptible"] <- "Susceptible"
+#write.csv(filtered_proportions_for_tests, "../R output/filtered_proportions_for_tests.csv")
+```
+
+Figure 2A
+```{r, warning=FALSE, message=FALSE}
+# identify the category with higher mean proportion for each Pfam
+pfam_assignment <- mean_proportions_significant %>%
+  group_by(accession) %>%
+  filter(mean_proportion == max(mean_proportion)) %>%
+  ungroup()
+
+# count total Pfams in each category
+pfam_count <- pfam_assignment %>%
+  group_by(group) %>%
+  summarise(total_pfams = n())
+
+# define colors
+custom_colors <- c("Resistant" = "#B22222", "Susceptible" = "#808080")
+
+# plot
+figure_2A <- ggplot(pfam_count, aes(x = group, y = total_pfams, fill = group)) +
+  geom_bar(stat = "identity", width = 0.6) +  # Bar plot with fixed width
+  scale_fill_manual(values = custom_colors) +  # Apply custom colors
+  labs(
+    title = "Number of Pfams Overrepresented",
+    x = "Population Category",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+    axis.line = element_line(size = 0.8),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.text.x = element_text(size = 14, color = "black"),
+    legend.position = "none",  # Remove legend since categories are labeled on the X-axis
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+figure_2A
+
+# save with a large size so that nothing is cut off
+#ggsave(filename = "../R output/Figures/Figure_2A_total_enrichedpfams.jpg", plot = figure_2A, width = 7, height = 7, dpi = 300, units = "in")
+```
+
+Figure 2B: Plot highlighting select examples that show existence of multiple mechanisms of predation resistance 
+```{r, warning=FALSE, message=FALSE}
+defense_pfams <- mean_proportions_significant[mean_proportions_significant$accession %in% c(
+  "PF00005.31",  # ABC transporter
+  "PF00528.26",  # Binding-protein-dependent transport system inner membrane component
+  "PF13450.10",  # NAD(P)-binding Rossmann-like domain
+  "PF07992.18",  # Pyridine nucleotide-disulphide oxidoreductase
+  "PF01593.28",  # Flavin-containing oxidoreductase
+  "PF00494.23",  # Squalene/phytoene synthase
+  "PF13304.10"   # AAA domain, putative AbiEii toxin, Type IV TA system
+), ]
+
+
+# define functional categories for grouping
+defense_pfams$category <- case_when(
+  defense_pfams$accession %in% c("PF00005.31", "PF00528.26") ~ "Transporters",
+  defense_pfams$accession %in% c("PF13450.10", "PF07992.18", "PF01593.28", "PF00494.23") ~ "Oxidative Stress Response",
+  defense_pfams$accession == "PF13304.10" ~ "Toxin-Antitoxin System"
+)
+
+# order categories as Transporters → Toxin-Antitoxin → Oxidative Stress
+defense_pfams$category <- factor(defense_pfams$category, levels = c("Transporters", "Toxin-Antitoxin System", "Oxidative Stress Response"))
+
+# define colors
+custom_colors <- c("Resistant" = "#B22222", "Susceptible" = "#808080")
+
+# define labels
+label_mapping <- c(
+  "PF13304.10" = "Putative AbiEii Toxin (Type IV System)",
+  "PF00005.31" = "ABC Transporter",
+  "PF00528.26" = "Binding Protein Transporter",
+  "PF13450.10" = "NAD(P) Rossmann Domain",
+  "PF07992.18" = "Pyridine Oxidoreductase",
+  "PF01593.28" = "Flavin Containing Amine Oxidoreductase",
+  "PF00494.23" = "Squalene/phytoene synthase"
+)
+
+# map shortened labels to df
+defense_pfams$short_function <- label_mapping[defense_pfams$accession]
+
+# move facet labels to the top & reorder Pfams within each category
+defense_pfams$short_function <- with(defense_pfams, reorder(short_function, mean_proportion))
+defense_pfams$group <- factor(defense_pfams$group, levels = c("Resistant", "Susceptible"))  # Change order
+
+#write.csv(defense_pfams, "../R output/defense_pfams.csv")
+```
+
+```{r, warning=FALSE, message=FALSE}
+# create the plot
+figure_2B_prelabel <- ggplot(defense_pfams, aes(x = mean_proportion, y = short_function, fill = group)) +
+  geom_bar(stat = "identity", position = position_dodge2(width = 0.2, preserve = "single"), width = 0.7) +  
+  facet_grid(rows = vars(category), scales = "free_y", space = "free_y") +  
+  scale_fill_manual(values = custom_colors, name = "Population category") +  # Ensure correct legend title
+  labs(
+    title = "Differential Abundance of Selected Pfams",
+    x = "Mean Proportion",
+    y = "Pfam Function"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+    plot.margin = ggplot2::margin(50, 100, 10, 10),  # Increased space between title and first facet
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 10),  # Ensure readable Y-axis labels
+    axis.text.x = element_text(size = 14),
+    axis.line = element_line(size = 0.8),
+    legend.position = "bottom",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_blank(),
+    panel.spacing = unit(3, "lines"),  # Ensure spacing between facets
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# save the plot
+#ggsave(filename = "../R output/Figures/Figure_2B_prelabel_PfamDiffAbund.jpg", 
+       plot = figure_2B_prelabel, width = 10, height = 10, dpi = 600, units = "in")
+
+figure_2B_prelabel 
+```
+
+Plot Figure 2C: PCoA of 23 enriched pfams for all populations to see if any clustering 
+```{r, warning=FALSE, message=FALSE}
+sig_accessions <- unique(mean_proportions_significant$accession)
+sigpfams_only_df <- subset(pfam_proportions_with_group, accession %in% sig_accessions)
+
+# prepare data for PCoA
+# matrix format
+sigpfams_pcoa <- sigpfams_only_df %>%
+  dplyr::select(bin, accession, proportion) %>% 
+  pivot_wider(names_from = accession, values_from = proportion)
+
+# set NAs to 0
+sigpfams_pcoa <- sigpfams_pcoa %>%
+  mutate(across(everything(), ~replace(., is.na(.), 0)))
+
+# remove text cols
+data_sigfams_pcoa <- sigpfams_pcoa[, -1] 
+
+# compute Bray-Curtis dissimilarity matrix
+sigfams_bray_curtis <- vegdist(data_sigfams_pcoa, method = "bray")
+
+# perform PCoA
+sigfams_pcoa_result <- cmdscale(sigfams_bray_curtis, eig = TRUE, k = 6)
+
+# calculate variation explained by the first two axes
+eigenvalues <- sigfams_pcoa_result$eig
+total_variation <- sum(eigenvalues)
+variation_explained <- eigenvalues / total_variation * 100
+```
+
+Plot 2C
+```{r, warning=FALSE, message=FALSE}
+# combine PCoA coordinates with bin and category info
+sigfams_pcoa_plot_data <- data.frame(x = sigfams_pcoa_result$points[, 1],
+                                     y = sigfams_pcoa_result$points[, 2],
+                                     bin = sigpfams_pcoa[, 1]) %>% 
+  left_join(sig_bins, by = "bin")
+
+# rename group labels
+sigfams_pcoa_plot_data$group[sigfams_pcoa_plot_data$group == "resistant"] <- "Resistant"
+sigfams_pcoa_plot_data$group[sigfams_pcoa_plot_data$group == "susceptible"] <- "Susceptible"
+
+# Calculate percentages of variation explained by the first two axes for the labels
+varPCoA1 <- variation_explained[1] 
+varPCoA2 <- variation_explained[2] 
+
+figure_2C <- ggplot(sigfams_pcoa_plot_data, aes(x = x, y = y, color = group)) +
+  geom_point(size = 4.5, alpha = 0.8) +
+  scale_color_manual(values = c("Resistant" = "#B22222", "Susceptible" = "#808080"), name = "Population category")+
+  #scale_color_manual(values = c("Resistant" = "red", "Susceptible" = "blue")) +
+  labs(x = paste("PCoA1 (", sprintf("%.2f", varPCoA1), "% variance)", sep=""), 
+       y = paste("PCoA2 (", sprintf("%.2f", varPCoA2), "% variance)", sep=""), 
+       color = "Group") +
+  ggtitle("PCoA of Overrepresented Pfams") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+        axis.line = element_blank(),
+        axis.title = element_text(size = 18, face = "bold"),
+        axis.text.y = element_text(size = 14, color = "black"),
+        axis.text.x = element_text(size = 14, color = "black"),
+        legend.position = "bottom",
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14, face = "bold"),
+        legend.key.size = unit(3,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1)
+        )
+
+ggsave(filename = "../R output/Figures/Figure_2C_pCoA_enrichedPfams.jpg", 
+       plot = figure_2C, width = 9, height = 7, dpi = 300, units = "in")
+
+figure_2C
+```
+
+Plot S2A: Differential abundance of 23 overrepresented Pfams
+```{r, warning=FALSE, message=FALSE}
+custom_colors <- c("Resistant" = "#B22222", "Susceptible" = "#808080")
+
+# Create the bar plot
+figure_S2A <- ggplot(mean_proportions_significant, aes(x = mean_proportion, y = function., fill = group)) +
+  geom_bar(stat = "identity", position = position_dodge2(width = 0.2, preserve = "single"), width = 0.7) +  
+  scale_fill_manual(values = custom_colors, name = "Population category") +  
+  labs(
+    title = "Differential Abundance of 23 Overrepresented Pfams",
+    x = "Mean Proportion",
+    y = "Pfam Function"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+    plot.margin = ggplot2::margin(50, 100, 10, 10),  
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 10),  
+    axis.text.x = element_text(size = 14),
+    axis.line = element_line(size = 0.8),
+    legend.position = "bottom",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    strip.text = element_blank(),
+    panel.spacing = unit(3, "lines"),  
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# Save the plot
+ggsave(filename = "../R output/Figures/Figure_S2A_Enriched_Pfams.jpg", 
+       plot = figure_S2A, 
+       width = 15, height = 10, dpi = 300, units = "in")
+```
+
+
+Plot S2B: Plot of top 10 Eigen values from the overrepresented Pfam PCoA
+```{r, warning=FALSE, message=FALSE}
+pcoa_eigenvalues_df <- data.frame(
+  Index = 1:10,
+  Eigenvalue = eigenvalues[1:10]
+)
+
+figure_S2B <- ggplot(pcoa_eigenvalues_df, aes(x = Index, y = Eigenvalue)) +
+  geom_point(size = 4.5, color = '#B22222', alpha = 0.8) + # Add points
+  theme_minimal() +
+  ggtitle("Top 10 Eigen Values of Overrepresented Pfam PCoA") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),
+        axis.line = element_blank(),
+        axis.title = element_text(size = 18, face = "bold"),
+        axis.text.y = element_text(size = 14, color = "black"),
+        axis.text.x = element_text(size = 14, color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+
+ggsave(filename = "../R output/Figures/Figure_S2B_eigenvalues.jpg", 
+       plot = figure_S2B, width = 9, height = 7, dpi = 300, units = "in")
+figure_S2B
+```
+
+
+Plot S2C: Plot PCoA of 23 enriched pfams only for only resistant populations to see if there is clustering based on taxonomy
+```{r, warning=FALSE, message=FALSE}
+# prepare data
+phylum_info <- bins_extendedinfo %>%
+  select(bin, t_phylum) %>%
+  distinct()  # Retain unique MAG-phylum pairs
+
+pcoa_ready <- filtered_proportions_for_tests %>%
+  filter(group == "Resistant") %>%
+  semi_join(significant_pfams_with_desc, by = "accession") %>%
+  select(bin, accession, proportion)
+
+pcoa_matrix <- pcoa_ready %>%
+  pivot_wider(names_from = accession, values_from = proportion, values_fill = 0) # create MAG x Pfam Matrix
+mag_names <- pcoa_matrix$bin # retain MAG names 
+pcoa_matrix <- pcoa_matrix %>% select(-bin) # remove from matrix
+bray_curtis_dist <- vegdist(pcoa_matrix, method = "bray") # Bray-Curtis Dissimilarity
+
+pcoa_res <- cmdscale(bray_curtis_dist, k = 2, eig = TRUE) # perform PCoA
+
+pcoa_df <- as.data.frame(pcoa_res$points) # convert to dataframe
+colnames(pcoa_df) <- c("PCoA1", "PCoA2")
+pcoa_df$MAG <- mag_names  # Re-add MAG names
+
+# merge with phylum information
+pcoa_df <- pcoa_df %>%
+  left_join(phylum_info, by = c("MAG" = "bin")) %>%
+  mutate(t_phylum = ifelse(is.na(t_phylum), "Unknown", t_phylum))
+
+# define colors for phyla present
+custom_colors <- c(
+  "Proteobacteria" = "#E1A91F",
+  "Planctomycetota" = "#B39BC8",
+  "Actinobacteriota" = "#D72638",
+  "Cyanobacteria" = "#78C2BE",
+  "Chloroflexota" = "#BCCF02")
+
+pcoa_df$t_phylum <- factor(pcoa_df$t_phylum, levels = names(custom_colors)) # set phylum as a factor for consistent color mapping
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# plot
+figure_S2C <- ggplot(pcoa_df, aes(x = PCoA1, y = PCoA2, label = MAG, color = t_phylum)) +
+  geom_point(size = 4, alpha = 1) +
+  scale_color_manual(values = custom_colors) +  # Apply custom colors
+  labs(
+    title = "Overrepresented Pfam composition for resistant populations",
+    x = paste0("PCoA1 (", round(pcoa_res$eig[1] / sum(pcoa_res$eig) * 100, 1), "% Variance)"),
+    y = paste0("PCoA2 (", round(pcoa_res$eig[2] / sum(pcoa_res$eig) * 100, 1), "% Variance)"),
+    color = "Phylum"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, vjust = 1, face = "bold", size = 22),  # Bold and centered title
+    axis.line = element_blank(),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.text.x = element_text(size = 14, color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.key.size = unit(3,"line"),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(), 
+    panel.border = element_rect(colour = "black", fill=NA, size=1)
+  )
+
+figure_S2C
+
+# save 
+ggsave(filename = "../R output/Figures/Figure_S2A_PCoA_enrichedpfams_taxonomy.jpg", plot = figure_S2C,width = 12, height = 7, dpi = 300, units = "in")
+```
+
+Permanova on Pfams of resistant mags based on taxonomy
+```{r, warning=FALSE, message=FALSE}
+# ensure the taxonomy table includes only resistant MAGs
+phylum_info_filtered <- phylum_info %>% filter(bin %in% mag_names)
+
+# run PERMANOVA with only resistant MAGs
+permanova_resistant <- adonis2(bray_curtis_dist ~ t_phylum, data = phylum_info_filtered, permutations = 999)
+print(permanova_resistant)  # If p < 0.05, taxonomic structure is significant
+```
+Permanova indicates significant difference in profiles based on taxonomy. 
+But, since there is uneven number of taxa within phyla, check if taxonomic groups differ in dispersion to validate PERMANOVA
+```{r}
+dispersion_test <- betadisper(bray_curtis_dist, phylum_info_filtered$t_phylum)
+anova(dispersion_test)
+```
+Here, p < 0.05 suggests that dispersion differences may affect clustering.
+
+
